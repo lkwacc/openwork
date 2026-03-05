@@ -461,7 +461,7 @@ export default function SkillsView(props: SkillsViewProps) {
       (!props.canInstallSkillCreator && !props.canUseDesktopTools)
   );
 
-  const workspaceLabel = createMemo(() => props.workspaceName.trim() || "Worker");
+  const workspaceLabel = createMemo(() => props.workspaceName.trim() || "工作区");
 
   const canCreateInChat = createMemo(
     () => !props.busy && (props.canInstallSkillCreator || props.canUseDesktopTools)
@@ -491,10 +491,10 @@ export default function SkillsView(props: SkillsViewProps) {
       <div class="rounded-2xl border border-dls-border bg-dls-surface px-5 py-5 shadow-[0_8px_26px_rgba(17,24,39,0.05)]">
         <div class="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
           <div class="min-w-0 space-y-1">
-            <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-dls-secondary">Worker profile</div>
+            <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-dls-secondary">工作区配置</div>
             <div class="text-xl font-semibold text-dls-text truncate">{workspaceLabel()}</div>
             <p class="text-sm text-dls-secondary">
-              Skills are the core abilities of this worker. Add from Hub or create new ones directly in chat.
+              技能是这个工作区的核心能力。可以从技能中心添加或在聊天中直接创建。
             </p>
           </div>
           <button
@@ -1064,15 +1064,15 @@ export default function SkillsView(props: SkillsViewProps) {
                   const conflict = taken.has(bundle().name.trim());
                   return (
                     <div class="rounded-xl border border-dls-border bg-dls-hover p-4 space-y-2">
-                      <div class="text-xs font-semibold text-dls-text">Preview</div>
+                      <div class="text-xs font-semibold text-dls-text">预览</div>
                       <div class="text-xs text-dls-secondary">
-                        Skill: <span class="font-mono">{bundle().name}</span>
+                        技能: <span class="font-mono">{bundle().name}</span>
                       </div>
                       <Show when={bundle().description}>
                         <div class="text-xs text-dls-secondary">{bundle().description}</div>
                       </Show>
                       <Show when={conflict}>
-                        <div class="text-xs text-amber-11">A skill with this name is already installed.</div>
+                        <div class="text-xs text-amber-11">已存在同名技能。</div>
                       </Show>
                     </div>
                   );
@@ -1088,7 +1088,7 @@ export default function SkillsView(props: SkillsViewProps) {
                   onClick={() => void previewInstallLink()}
                   disabled={installLinkBusy() || !installLinkUrl().trim()}
                 >
-                  {installLinkBusy() && !installLinkBundle() ? "Loading…" : "Preview"}
+                  {installLinkBusy() && !installLinkBundle() ? "加载中..." : "预览"}
                 </Button>
                 <Show when={installLinkBundle()} keyed>
                   {(bundle) => {

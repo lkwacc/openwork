@@ -152,10 +152,10 @@ const taskSummary = (job: ScheduledJob) => {
 };
 
 const statusLabel = (status?: string | null) => {
-  if (!status) return "Not run yet";
-  if (status === "running") return "Running";
-  if (status === "success") return "Success";
-  if (status === "failed") return "Failed";
+  if (!status) return "尚未运行";
+  if (status === "running") return "运行中";
+  if (status === "success") return "成功";
+  if (status === "failed") return "失败";
   return status;
 };
 
@@ -811,10 +811,10 @@ export default function ScheduledTasksView(props: ScheduledTasksViewProps) {
               </div>
               <div class="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleteBusy()}>
-                  Cancel
+                  取消
                 </Button>
                 <Button variant="danger" onClick={confirmDelete} disabled={deleteBusy()}>
-                  {deleteBusy() ? "Deleting" : "Delete"}
+                  {deleteBusy() ? "正在删除" : "删除"}
                 </Button>
               </div>
             </div>

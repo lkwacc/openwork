@@ -271,7 +271,7 @@ export default function SettingsView(props: SettingsViewProps) {
     const state = updateState();
     if (state === "available") return "Download";
     if (state === "ready") return "Install";
-    if (state === "error") return "Retry";
+    if (state === "error") return "重试";
     if (state === "idle") return "Check";
     return null;
   });
@@ -300,13 +300,13 @@ export default function SettingsView(props: SettingsViewProps) {
   const notionStatusLabel = () => {
     switch (props.notionStatus) {
       case "connected":
-        return "Connected";
+        return "已连接";
       case "connecting":
-        return "Reload required";
+        return "需要重新加载";
       case "error":
-        return "Connection failed";
+        return "连接失败";
       default:
-        return "Not connected";
+        return "未连接";
     }
   };
 
@@ -347,9 +347,9 @@ export default function SettingsView(props: SettingsViewProps) {
     return Array.from(new Set(names));
   });
   const providerStatusLabel = createMemo(() => {
-    if (!providerAvailableCount()) return "Unavailable";
-    if (!providerConnectedCount()) return "Not connected";
-    return `${providerConnectedCount()} connected`;
+    if (!providerAvailableCount()) return "不可用";
+    if (!providerConnectedCount()) return "未连接";
+    return `${providerConnectedCount()} 已连接`;
   });
   const providerStatusStyle = createMemo(() => {
     if (!providerAvailableCount()) return "bg-gray-4/60 text-gray-11 border-gray-7/50";
@@ -357,11 +357,11 @@ export default function SettingsView(props: SettingsViewProps) {
     return "bg-green-7/10 text-green-11 border-green-7/20";
   });
   const providerSummary = createMemo(() => {
-    if (!providerAvailableCount()) return "Connect to OpenCode to load providers.";
+    if (!providerAvailableCount()) return "连接 OpenCode 以加载供应商。";
     const connected = providerConnectedCount();
     const available = providerAvailableCount();
-    if (!connected) return `${available} available`;
-    return `${connected} connected · ${available} available`;
+    if (!connected) return `${available} 可用`;
+    return `${connected} 已连接 · ${available} 可用`;
   });
 
   const handleOpenProviderAuth = async () => {
@@ -416,11 +416,11 @@ export default function SettingsView(props: SettingsViewProps) {
   const openworkStatusLabel = createMemo(() => {
     switch (props.openworkServerStatus) {
       case "connected":
-        return "Connected";
+        return "已连接";
       case "limited":
-        return "Limited";
+        return "受限";
       default:
-        return "Not connected";
+        return "未连接";
     }
   });
 
@@ -436,8 +436,8 @@ export default function SettingsView(props: SettingsViewProps) {
   });
 
   const engineStatusLabel = createMemo(() => {
-    if (!isTauriRuntime()) return "Unavailable";
-    return props.engineInfo?.running ? "Running" : "Offline";
+    if (!isTauriRuntime()) return "不可用";
+    return props.engineInfo?.running ? "运行中" : "离线";
   });
 
   const engineStatusStyle = createMemo(() => {
@@ -449,10 +449,10 @@ export default function SettingsView(props: SettingsViewProps) {
 
   const opencodeConnectStatusLabel = createMemo(() => {
     const status = props.opencodeConnectStatus?.status;
-    if (!status) return "Idle";
-    if (status === "connected") return "Connected";
-    if (status === "connecting") return "Connecting";
-    return "Failed";
+    if (!status) return "空闲";
+    if (status === "connected") return "已连接";
+    if (status === "connecting") return "连接中";
+    return "失败";
   });
 
   const opencodeConnectStatusStyle = createMemo(() => {
@@ -470,8 +470,8 @@ export default function SettingsView(props: SettingsViewProps) {
   });
 
   const opencodeRouterStatusLabel = createMemo(() => {
-    if (!isTauriRuntime()) return "Unavailable";
-    return props.opencodeRouterInfo?.running ? "Running" : "Offline";
+    if (!isTauriRuntime()) return "不可用";
+    return props.opencodeRouterInfo?.running ? "运行中" : "离线";
   });
 
   const opencodeRouterStatusStyle = createMemo(() => {
@@ -495,7 +495,7 @@ export default function SettingsView(props: SettingsViewProps) {
     const opencodeUsername = props.engineInfo?.opencodeUsername?.trim() || undefined;
     const opencodePassword = props.engineInfo?.opencodePassword?.trim() || undefined;
     if (!workspacePath) {
-      setOpenCodeRouterRestartError("No worker path available");
+      setOpenCodeRouterRestartError("无可用工作区路径");
       return;
     }
     setOpenCodeRouterRestarting(true);
@@ -556,8 +556,8 @@ export default function SettingsView(props: SettingsViewProps) {
   };
 
   const orchestratorStatusLabel = createMemo(() => {
-    if (!props.orchestratorStatus) return "Unavailable";
-    return props.orchestratorStatus.running ? "Running" : "Offline";
+    if (!props.orchestratorStatus) return "不可用";
+    return props.orchestratorStatus.running ? "运行中" : "离线";
   });
 
   const orchestratorStatusStyle = createMemo(() => {
@@ -568,10 +568,10 @@ export default function SettingsView(props: SettingsViewProps) {
   });
 
   const openworkAuditStatusLabel = createMemo(() => {
-    if (!props.openworkServerWorkspaceId) return "Unavailable";
-    if (props.openworkAuditStatus === "loading") return "Loading";
-    if (props.openworkAuditStatus === "error") return "Error";
-    return "Ready";
+    if (!props.openworkServerWorkspaceId) return "不可用";
+    if (props.openworkAuditStatus === "loading") return "加载中";
+    if (props.openworkAuditStatus === "error") return "错误";
+    return "就绪";
   });
 
   const openworkAuditStatusStyle = createMemo(() => {
@@ -584,9 +584,9 @@ export default function SettingsView(props: SettingsViewProps) {
   const isLocalEngineRunning = createMemo(() => Boolean(props.engineInfo?.running));
   const isLocalPreference = createMemo(() => props.startupPreference === "local");
   const startupLabel = createMemo(() => {
-    if (props.startupPreference === "local") return "Start local server";
-    if (props.startupPreference === "server") return "Connect to server";
-    return "Not set";
+    if (props.startupPreference === "local") return "启动本地服务器";
+    if (props.startupPreference === "server") return "连接到服务器";
+    return "未设置";
   });
 
   const tabLabel = (tab: SettingsTab) => {
@@ -630,15 +630,15 @@ export default function SettingsView(props: SettingsViewProps) {
   };
 
   const formatCapability = (cap?: { read?: boolean; write?: boolean; source?: string }) => {
-    if (!cap) return "Unavailable";
-    const parts = [cap.read ? "read" : null, cap.write ? "write" : null].filter(Boolean).join(" / ");
-    const label = parts || "no access";
+    if (!cap) return "不可用";
+    const parts = [cap.read ? "读取" : null, cap.write ? "写入" : null].filter(Boolean).join(" / ");
+    const label = parts || "无权限";
     return cap.source ? `${label} · ${cap.source}` : label;
   };
 
   const engineStdout = () => {
-    if (!isTauriRuntime()) return "Available in the desktop app.";
-    return props.engineInfo?.lastStdout?.trim() || "No stdout captured yet.";
+    if (!isTauriRuntime()) return "仅在桌面应用中可用。";
+    return props.engineInfo?.lastStdout?.trim() || "暂无 stdout 输出。";
   };
 
   const engineStderr = () => {
@@ -784,7 +784,7 @@ export default function SettingsView(props: SettingsViewProps) {
                   onClick={handleOpenProviderAuth}
                   disabled={props.busy || props.providerAuthBusy}
                 >
-                  {props.providerAuthBusy ? "Loading providers..." : "Connect provider"}
+                  {props.providerAuthBusy ? "正在加载供应商..." : "连接供应商"}
                 </Button>
                 <div class="text-xs text-gray-10">{providerSummary()}</div>
               </div>
@@ -1736,7 +1736,7 @@ export default function SettingsView(props: SettingsViewProps) {
                           {props.opencodeRouterInfo?.opencodeUrl?.trim() || "OpenCode URL unavailable"}
                         </div>
                         <div class="text-[11px] text-gray-7 font-mono truncate">
-                          {props.opencodeRouterInfo?.workspacePath?.trim() || "No worker directory"}
+                          {props.opencodeRouterInfo?.workspacePath?.trim() || "无工作目录"}
                         </div>
                         <div class="text-[11px] text-gray-7 font-mono truncate">
                           Health port: {props.opencodeRouterInfo?.healthPort ?? "—"}
@@ -1818,7 +1818,7 @@ export default function SettingsView(props: SettingsViewProps) {
                     <div class="flex items-center justify-between gap-3">
                       <div class="text-sm font-medium text-gray-12">OpenWork server capabilities</div>
                       <div class="text-[11px] text-gray-8 font-mono truncate">
-                        {props.openworkServerWorkspaceId ? `Worker ${props.openworkServerWorkspaceId}` : "Worker unresolved"}
+                        {props.openworkServerWorkspaceId ? `工作区 ${props.openworkServerWorkspaceId}` : "工作区未解析"}
                       </div>
                     </div>
                     <Show

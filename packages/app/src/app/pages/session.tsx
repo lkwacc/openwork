@@ -4024,8 +4024,8 @@ export default function SessionView(props: SessionViewProps) {
             ? `This will permanently delete \"${selectedSessionTitle().trim()}\" and its messages.`
             : "This will permanently delete the selected session and its messages."
         }
-        confirmLabel={deleteSessionBusy() ? "Deleting..." : "Delete"}
-        cancelLabel="Cancel"
+        confirmLabel={deleteSessionBusy() ? "正在删除..." : "删除"}
+        cancelLabel="取消"
         variant="danger"
         onConfirm={confirmDeleteSession}
         onCancel={closeDeleteSessionModal}

@@ -67,11 +67,11 @@ export default function ConfigView(props: ConfigViewProps) {
   const openworkStatusLabel = createMemo(() => {
     switch (props.openworkServerStatus) {
       case "connected":
-        return "Connected";
+        return "已连接";
       case "limited":
-        return "Limited";
+        return "受限";
       default:
-        return "Not connected";
+        return "未连接";
     }
   });
 
@@ -124,8 +124,8 @@ export default function ConfigView(props: ConfigViewProps) {
 
   const hostInfo = createMemo(() => props.openworkServerHostInfo);
   const hostStatusLabel = createMemo(() => {
-    if (!hostInfo()?.running) return "Offline";
-    return "Available";
+    if (!hostInfo()?.running) return "离线";
+    return "可用";
   });
   const hostStatusStyle = createMemo(() => {
     if (!hostInfo()?.running) return "bg-gray-4/60 text-gray-11 border-gray-7/50";
@@ -311,7 +311,7 @@ export default function ConfigView(props: ConfigViewProps) {
               onClick={() => void handleCopy(diagnosticsBundleJson(), "debug-bundle")}
               disabled={props.busy}
             >
-              {copyingField() === "debug-bundle" ? "Copied" : "Copy"}
+              {copyingField() === "debug-bundle" ? "已复制" : "复制"}
             </Button>
           </div>
           <pre class="text-xs text-gray-12 whitespace-pre-wrap break-words max-h-64 overflow-auto bg-gray-1/20 border border-gray-6 rounded-xl p-3">
@@ -353,7 +353,7 @@ export default function ConfigView(props: ConfigViewProps) {
                 onClick={() => handleCopy(hostConnectUrl(), "host-url")}
                 disabled={!hostConnectUrl()}
               >
-                {copyingField() === "host-url" ? "Copied" : "Copy"}
+                {copyingField() === "host-url" ? "已复制" : "复制"}
               </Button>
             </div>
 
@@ -384,7 +384,7 @@ export default function ConfigView(props: ConfigViewProps) {
                   onClick={() => handleCopy(hostInfo()?.clientToken ?? "", "client-token")}
                   disabled={!hostInfo()?.clientToken}
                 >
-                  {copyingField() === "client-token" ? "Copied" : "Copy"}
+                  {copyingField() === "client-token" ? "已复制" : "复制"}
                 </Button>
               </div>
             </div>
@@ -416,7 +416,7 @@ export default function ConfigView(props: ConfigViewProps) {
                   onClick={() => handleCopy(hostInfo()?.hostToken ?? "", "host-token")}
                   disabled={!hostInfo()?.hostToken}
                 >
-                  {copyingField() === "host-token" ? "Copied" : "Copy"}
+                  {copyingField() === "host-token" ? "已复制" : "复制"}
                 </Button>
               </div>
             </div>
@@ -474,8 +474,8 @@ export default function ConfigView(props: ConfigViewProps) {
         </div>
 
         <div class="space-y-1">
-          <div class="text-[11px] text-gray-7 font-mono truncate">Resolved worker URL: {resolvedWorkspaceUrl() || "Not set"}</div>
-          <div class="text-[11px] text-gray-8 font-mono truncate">Worker ID: {resolvedWorkspaceId() || "Unavailable"}</div>
+          <div class="text-[11px] text-gray-7 font-mono truncate">已解析的工作区 URL: {resolvedWorkspaceUrl() || "未设置"}</div>
+          <div class="text-[11px] text-gray-8 font-mono truncate">工作区 ID: {resolvedWorkspaceId() || "不可用"}</div>
         </div>
 
         <div class="flex flex-wrap gap-2">
@@ -531,8 +531,8 @@ export default function ConfigView(props: ConfigViewProps) {
           </div>
         </Show>
 
-        <Show when={openworkStatusLabel() !== "Connected"}>
-          <div class="text-xs text-gray-9">OpenWork server connection needed to sync skills, plugins, and commands.</div>
+        <Show when={openworkStatusLabel() !== "已连接"}>
+          <div class="text-xs text-gray-9">需要连接 OpenWork 服务器以同步技能、插件和命令。</div>
         </Show>
       </div>
 

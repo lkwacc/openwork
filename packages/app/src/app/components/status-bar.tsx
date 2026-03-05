@@ -60,21 +60,21 @@ export default function StatusBar(props: StatusBarProps) {
   const opencodeStatusMeta = createMemo(() => ({
     dot: props.clientConnected ? "bg-green-9" : "bg-gray-6",
     text: props.clientConnected ? "text-green-11" : "text-gray-10",
-    label: props.clientConnected ? "Connected" : "Not connected",
+    label: props.clientConnected ? "已连接" : "未连接",
   }));
 
   const openworkStatusMeta = createMemo(() => {
     switch (props.openworkServerStatus) {
       case "connected":
-        return { dot: "bg-green-9", text: "text-green-11", label: "Connected" };
+        return { dot: "bg-green-9", text: "text-green-11", label: "已连接" };
       case "limited":
         return {
           dot: "bg-amber-9",
           text: "text-amber-11",
-          label: "Limited access",
+          label: "访问受限",
         };
       default:
-        return { dot: "bg-gray-6", text: "text-gray-10", label: "Unavailable" };
+        return { dot: "bg-gray-6", text: "text-gray-10", label: "不可用" };
     }
   });
 
@@ -82,18 +82,18 @@ export default function StatusBar(props: StatusBarProps) {
     const allGreen =
       props.clientConnected && props.openworkServerStatus === "connected";
     return allGreen
-      ? { dot: "bg-green-9", text: "text-green-11", label: "Ready" }
-      : { dot: "bg-red-9", text: "text-red-11", label: "Unavailable" };
+      ? { dot: "bg-green-9", text: "text-green-11", label: "就绪" }
+      : { dot: "bg-red-9", text: "text-red-11", label: "不可用" };
   });
 
   const messagingMeta = createMemo(() => {
     const status = opencodeRouterStatus();
     if (!status) {
-      return {
-        dot: "bg-gray-6",
-        text: "text-gray-10",
-        label: "Messaging bridge unavailable",
-      };
+        return {
+          dot: "bg-gray-6",
+          text: "text-gray-10",
+          label: "消息桥不可用",
+        };
     }
     const telegramConfigured = (status.telegram.items?.length ?? 0) > 0;
     const slackConfigured = (status.slack.items?.length ?? 0) > 0;
@@ -104,21 +104,21 @@ export default function StatusBar(props: StatusBarProps) {
       return {
         dot: "bg-green-9",
         text: "text-green-11",
-        label: "Messaging bridge ready",
+        label: "消息桥已就绪",
       };
     }
     if (configuredCount > 0 || status.running) {
       return {
         dot: "bg-amber-9",
         text: "text-amber-11",
-        label: "Messaging bridge setup",
+        label: "消息桥配置中",
       };
     }
-    return {
-      dot: "bg-gray-6",
-      text: "text-gray-10",
-      label: "Messaging bridge offline",
-    };
+      return {
+        dot: "bg-gray-6",
+        text: "text-gray-10",
+        label: "消息桥离线",
+      };
   });
 
   type ProTip = {
@@ -146,7 +146,7 @@ export default function StatusBar(props: StatusBarProps) {
   const proTips = createMemo<ProTip[]>(() => [
     {
       id: "slack",
-      label: "Connect Slack",
+      label: "连接 Slack",
       enabled: () => {
         const status = opencodeRouterStatus();
         return Boolean(status && (status.slack.items?.length ?? 0) === 0);
@@ -155,7 +155,7 @@ export default function StatusBar(props: StatusBarProps) {
     },
     {
       id: "telegram",
-      label: "Connect Telegram",
+      label: "连接 Telegram",
       enabled: () => {
         const status = opencodeRouterStatus();
         return Boolean(status && (status.telegram.items?.length ?? 0) === 0);
@@ -164,13 +164,13 @@ export default function StatusBar(props: StatusBarProps) {
     },
     {
       id: "notion",
-      label: "Connect Notion MCP",
+      label: "连接 Notion MCP",
       enabled: () => notionStatus() !== "connected",
       action: () => runAction(props.onOpenMcp),
     },
     {
       id: "providers",
-      label: "Use your own models (OpenRouter, Anthropic, OpenAI)",
+      label: "使用自己的模型 (OpenRouter, Anthropic, OpenAI)",
       enabled: () => props.clientConnected && providerConnectedCount() === 0,
       action: () => runAction(props.onOpenProviders),
     },
@@ -288,7 +288,7 @@ export default function StatusBar(props: StatusBarProps) {
                   />
                   <Cpu class="w-3.5 h-3.5 text-gray-11" />
                   <span class="text-xs text-gray-12 font-medium">
-                    OpenCode Engine
+                    OpenCode 引擎
                   </span>
                   <span class={`ml-auto text-xs ${opencodeStatusMeta().text}`}>
                     {opencodeStatusMeta().label}
@@ -300,7 +300,7 @@ export default function StatusBar(props: StatusBarProps) {
                   />
                   <Server class="w-3.5 h-3.5 text-gray-11" />
                   <span class="text-xs text-gray-12 font-medium">
-                    {props.startupPreference === "server" ? "Remote Server" : "Local Server"}
+                    {props.startupPreference === "server" ? "远程服务器" : "本地服务器"}
                   </span>
                   <span class={`ml-auto text-xs ${openworkStatusMeta().text}`}>
                     {openworkStatusMeta().label}

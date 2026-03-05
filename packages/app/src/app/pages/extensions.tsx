@@ -59,9 +59,9 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
     <section class="space-y-6 animate-in fade-in duration-300">
       <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div class="space-y-1">
-          <h2 class="text-3xl font-bold text-dls-text">Extensions</h2>
+          <h2 class="text-3xl font-bold text-dls-text">扩展</h2>
           <p class="text-sm text-dls-secondary mt-1.5">
-            Apps (MCP) and OpenCode plugins live in one place.
+            MCP 应用和 OpenCode 插件集中在一处。
           </p>
           <div class="mt-3 flex flex-wrap items-center gap-2">
             <Show when={connectedAppsCount() > 0}>

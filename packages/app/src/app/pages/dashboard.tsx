@@ -336,21 +336,21 @@ export default function DashboardView(props: DashboardViewProps) {
   const title = createMemo(() => {
     switch (props.tab) {
       case "scheduled":
-        return "Automations";
+        return "自动化";
       case "soul":
-        return "Soul";
+        return "灵魂";
       case "skills":
-        return "Skills";
+        return "技能";
       case "plugins":
-        return "Extensions";
+        return "扩展";
       case "mcp":
-        return "Extensions";
+        return "扩展";
       case "identities":
-        return "Messaging";
+        return "消息";
       case "config":
-        return "Advanced";
+        return "高级";
       case "settings":
-        return "Settings";
+        return "设置";
       default:
         return "Automations";
     }
@@ -1539,12 +1539,12 @@ export default function DashboardView(props: DashboardViewProps) {
 
       <aside class="w-56 hidden md:flex flex-col bg-dls-sidebar border-l border-dls-border p-4">
         <div class="space-y-1 pt-2">
-          {navItem("scheduled", "Automations", <History size={18} />)}
-          {navItem("soul", "Soul", <HeartPulse size={18} class={soulNavIconClass()} />)}
-          {navItem("skills", "Skills", <Zap size={18} />)}
-          {navItem("mcp", "Extensions", <Box size={18} />)}
-          {navItem("identities", "Messaging", <MessageCircle size={18} />)}
-          <Show when={props.developerMode}>{navItem("config", "Advanced", <SlidersHorizontal size={18} />)}</Show>
+          {navItem("scheduled", "自动化", <History size={18} />)}
+{navItem("soul", "灵魂", <HeartPulse size={18} class={soulNavIconClass()} />)}
+{navItem("skills", "技能", <Zap size={18} />)}
+{navItem("mcp", "扩展", <Box size={18} />)}
+{navItem("identities", "消息", <MessageCircle size={18} />)}
+          <Show when={props.developerMode}>{navItem("config", "高级", <SlidersHorizontal size={18} />)}</Show>
         </div>
       </aside>
 
