@@ -21,6 +21,8 @@ import type {
   StartupPreference,
 } from "../types";
 
+import { currentLocale, t } from "../../i18n";
+
 import {
   obsidianIsAvailable,
   openInObsidian,
@@ -390,7 +392,7 @@ export default function SessionView(props: SessionViewProps) {
       for (const session of group.sessions) {
         const sessionId = session.id?.trim() ?? "";
         if (!sessionId) continue;
-        const title = session.title?.trim() || "Untitled session";
+        const title = session.title?.trim() || t("session.untitled", currentLocale());
         const slug = session.slug?.trim() ?? "";
         const updatedAt = session.time?.updated ?? session.time?.created ?? 0;
         out.push({
@@ -2842,7 +2844,130 @@ export default function SessionView(props: SessionViewProps) {
 
   const handleSendPrompt = (draft: ComposerDraft) => {
     startRun();
-    props.sendPromptAsync(draft).catch(() => undefined);
+    props.sendPromptAsync(draft).catch((error) => {
+      const message =
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : t("session.quickstart.send_failed", currentLocale());
+      setToastMessage(message);
+    });
+  };
+
+  const sendQuickPrompt = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    props.setPrompt(trimmed);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("openwork:focusPrompt"));
+    }
+    if (!props.clientConnected) {
+      setToastMessage(t("session.quickstart.connect_first", currentLocale()));
+      return false;
+    }
+    handleSendPrompt({
+      mode: "prompt",
+      text: trimmed,
+      resolvedText: trimmed,
+      parts: [{ type: "text", text: trimmed }],
+      attachments: [],
+    });
+    return true;
+  };
+
+  const handleStartProjectQuickstart = () => {
+    if (sendQuickPrompt(t("session.quickstart.start_prompt", currentLocale()))) {
+      setToastMessage(t("session.quickstart.sent_to_chat", currentLocale()));
+    }
+  };
+
+  const handleBuildProjectQuickstart = () => {
+    if (sendQuickPrompt(t("session.quickstart.build_prompt", currentLocale()))) {
+      setToastMessage(t("session.quickstart.sent_to_chat", currentLocale()));
+    }
+  };
+
+  const handleRunProjectQuickstart = () => {
+    if (sendQuickPrompt(t("session.quickstart.run_prompt", currentLocale()))) {
+      setToastMessage(t("session.quickstart.sent_to_chat", currentLocale()));
+    }
+  };
+
+  const normalizePreviewUrl = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    if (/^\d{2,5}$/.test(trimmed)) return `http://127.0.0.1:${trimmed}`;
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+    return `http://${trimmed}`;
+  };
+
+  const probePreviewUrl = async (url: string) => {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 700);
+    try {
+      await fetch(url, { method: "GET", mode: "no-cors", cache: "no-store", signal: controller.signal });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  };
+
+  const openExternalUrl = async (url: string) => {
+    if (isTauriRuntime()) {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl(url);
+      return;
+    }
+    const popup = window.open(url, "_blank", "noopener,noreferrer");
+    if (!popup) throw new Error("popup blocked");
+  };
+
+  const handleOpenBrowserQuickstart = async () => {
+    if (typeof window === "undefined") return;
+    const previewKey = "openwork.previewUrl";
+    const stored = normalizePreviewUrl(window.localStorage.getItem(previewKey) ?? "");
+    const candidates = [stored, "http://127.0.0.1:5173", "http://127.0.0.1:3000", "http://127.0.0.1:8080"].filter(Boolean);
+    const deduped = Array.from(new Set(candidates));
+
+    let target = "";
+    for (const candidate of deduped) {
+      if (await probePreviewUrl(candidate)) {
+        target = candidate;
+        break;
+      }
+    }
+
+    if (!target) {
+      const raw = window.prompt(
+        t("session.quickstart.open_browser_prompt", currentLocale()),
+        stored || "127.0.0.1:5173",
+      );
+      if (raw == null) {
+        setToastMessage(t("session.quickstart.browser_cancelled", currentLocale()));
+        return;
+      }
+      target = normalizePreviewUrl(raw);
+      if (!target) {
+        setToastMessage(t("session.quickstart.browser_invalid_url", currentLocale()));
+        return;
+      }
+    }
+
+    try {
+      await openExternalUrl(target);
+      window.localStorage.setItem(previewKey, target);
+      const browserMessage = t("session.quickstart.browser_opened_url", currentLocale()).replace("{url}", target);
+      const commandPrompt = t("session.quickstart.open_browser_chat_prompt_with_url", currentLocale()).replace(
+        "{url}",
+        target,
+      );
+      const commandSent = sendQuickPrompt(commandPrompt);
+      const commandMessage = commandSent ? t("session.quickstart.sent_to_chat", currentLocale()) : "";
+      setToastMessage([browserMessage, commandMessage].filter(Boolean).join(" "));
+    } catch {
+      setToastMessage(t("session.quickstart.browser_blocked", currentLocale()));
+    }
   };
 
   const handleBrowserAutomationQuickstart = async () => {
@@ -3151,13 +3276,16 @@ export default function SessionView(props: SessionViewProps) {
   const updatePillLabel = createMemo(() => {
     const state = props.updateStatus?.state;
     if (state === "ready") {
-      return props.anyActiveRuns ? "Update ready" : "Install update";
+      return props.anyActiveRuns
+        ? t("session.update_ready", currentLocale())
+        : t("session.install_update", currentLocale());
     }
     if (state === "downloading") {
       const percent = updateDownloadPercent();
-      return percent == null ? "Downloading" : `Downloading ${percent}%`;
+      if (percent == null) return t("session.downloading", currentLocale());
+      return t("session.downloading_percent", currentLocale()).replace("{percent}", String(percent));
     }
-    return "Update available";
+    return t("session.update_available", currentLocale());
   });
 
   const updatePillButtonTone = createMemo(() => {
@@ -3211,11 +3339,13 @@ export default function SessionView(props: SessionViewProps) {
     const state = props.updateStatus?.state;
     if (state === "ready") {
       return props.anyActiveRuns
-        ? `Update ready ${version}. Stop active runs to restart.`
-        : `Restart to apply update ${version}`;
+        ? t("session.update_title_ready_blocked", currentLocale()).replace("{version}", version)
+        : t("session.update_title_ready", currentLocale()).replace("{version}", version);
     }
-    if (state === "downloading") return `Downloading update ${version}`;
-    return `Update available ${version}`;
+    if (state === "downloading") {
+      return t("session.update_title_downloading", currentLocale()).replace("{version}", version);
+    }
+    return t("session.update_title_available", currentLocale()).replace("{version}", version);
   });
 
   const handleUpdatePillClick = () => {
@@ -3347,7 +3477,9 @@ export default function SessionView(props: SessionViewProps) {
               </button>
             </Show>
 
-            <h1 class="text-[13.5px] font-medium text-gray-11 truncate">{selectedSessionTitle() || "Explore and identify available topics"}</h1>
+            <h1 class="text-[13.5px] font-medium text-gray-11 truncate">
+              {selectedSessionTitle() || t("session.default_header_title", currentLocale())}
+            </h1>
             <Show when={props.developerMode}>
               <span class="text-xs text-dls-secondary">{props.headerStatus}</span>
             </Show>
@@ -3357,6 +3489,42 @@ export default function SessionView(props: SessionViewProps) {
           </div>
 
           <div class="flex items-center gap-2">
+            <div class="flex items-center gap-1 mr-1 overflow-x-auto">
+              <button
+                type="button"
+                class="h-9 px-2.5 flex items-center justify-center rounded-lg text-[11px] font-mono text-gray-10 hover:text-gray-12 hover:bg-gray-3 border border-transparent transition-colors whitespace-nowrap"
+                onClick={handleStartProjectQuickstart}
+                title={t("session.quickstart.start_description", currentLocale())}
+              >
+                {t("session.quickstart.start_title", currentLocale())}
+              </button>
+              <button
+                type="button"
+                class="h-9 px-2.5 flex items-center justify-center rounded-lg text-[11px] font-mono text-gray-10 hover:text-gray-12 hover:bg-gray-3 border border-transparent transition-colors whitespace-nowrap"
+                onClick={handleBuildProjectQuickstart}
+                title={t("session.quickstart.build_description", currentLocale())}
+              >
+                {t("session.quickstart.build_title", currentLocale())}
+              </button>
+              <button
+                type="button"
+                class="h-9 px-2.5 flex items-center justify-center rounded-lg text-[11px] font-mono text-gray-10 hover:text-gray-12 hover:bg-gray-3 border border-transparent transition-colors whitespace-nowrap"
+                onClick={handleRunProjectQuickstart}
+                title={t("session.quickstart.run_description", currentLocale())}
+              >
+                {t("session.quickstart.run_title", currentLocale())}
+              </button>
+              <button
+                type="button"
+                class="h-9 px-2.5 flex items-center justify-center rounded-lg text-[11px] font-mono text-gray-10 hover:text-gray-12 hover:bg-gray-3 border border-transparent transition-colors whitespace-nowrap"
+                onClick={() => {
+                  void handleOpenBrowserQuickstart();
+                }}
+                title={t("session.quickstart.open_browser_description", currentLocale())}
+              >
+                {t("session.quickstart.open_browser_title", currentLocale())}
+              </button>
+            </div>
             <button
               type="button"
               class={`h-9 px-2.5 flex items-center justify-center rounded-lg text-[11px] font-mono transition-colors ${
@@ -3426,8 +3594,8 @@ export default function SessionView(props: SessionViewProps) {
               class="h-9 w-9 flex items-center justify-center rounded-lg text-gray-10 hover:text-gray-12 hover:bg-gray-3 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
               onClick={compactSessionHistory}
               disabled={!canCompactSession() || historyActionBusy() !== null}
-              title="Compact session context"
-              aria-label="Compact session context"
+              title={t("session.menu.compact", currentLocale())}
+              aria-label={t("session.menu.compact", currentLocale())}
             >
               <Show when={historyActionBusy() === "compact"} fallback={<Maximize2 size={16} />}>
                 <Loader2 size={16} class="animate-spin" />
@@ -3438,8 +3606,16 @@ export default function SessionView(props: SessionViewProps) {
                 type="button"
                 class="h-9 w-9 flex items-center justify-center rounded-lg text-gray-10 hover:text-gray-12 hover:bg-gray-3 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                 disabled={!props.selectedSessionId}
-                title={props.selectedSessionId ? "Session actions" : "Select a session to manage it"}
-                aria-label={props.selectedSessionId ? "Session actions" : "Select a session to manage it"}
+                title={
+                  props.selectedSessionId
+                    ? t("session.menu.actions", currentLocale())
+                    : t("session.menu.select_session_hint", currentLocale())
+                }
+                aria-label={
+                  props.selectedSessionId
+                    ? t("session.menu.actions", currentLocale())
+                    : t("session.menu.select_session_hint", currentLocale())
+                }
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -3463,21 +3639,21 @@ export default function SessionView(props: SessionViewProps) {
                     }}
                     disabled={!canCompactSession() || historyActionBusy() !== null}
                   >
-                    Compact session context
+                    {t("session.menu.compact", currentLocale())}
                   </button>
                   <button
                     type="button"
                     class="w-full text-left px-2 py-1.5 text-sm rounded-md hover:bg-gray-3"
                     onClick={openRenameModal}
                   >
-                    Rename session
+                    {t("session.menu.rename", currentLocale())}
                   </button>
                   <button
                     type="button"
                     class="w-full text-left px-2 py-1.5 text-sm rounded-md hover:bg-gray-3 text-red-11"
                     onClick={openDeleteSessionModal}
                   >
-                    Delete session
+                    {t("session.menu.delete", currentLocale())}
                   </button>
                 </div>
               </Show>
@@ -3557,38 +3733,16 @@ export default function SessionView(props: SessionViewProps) {
                  <Zap class="text-dls-secondary" />
                </div>
               <div class="space-y-2">
-                <h3 class="text-xl font-medium">What do you want to do?</h3>
+                <h3 class="text-xl font-medium">{t("session.empty_title", currentLocale())}</h3>
                 <p class="text-dls-secondary text-sm max-w-sm mx-auto">
-                  Pick a starting point or just type below.
+                  {t("session.empty_description", currentLocale())}
                 </p>
               </div>
-              <div class="grid gap-3 sm:grid-cols-2 max-w-2xl mx-auto text-left">
-                <button
-                  type="button"
-                  class="rounded-2xl border border-dls-border bg-dls-hover p-4 transition-all hover:bg-dls-active hover:border-gray-7"
-                  onClick={() => {
-                    void handleBrowserAutomationQuickstart();
-                  }}
-                >
-                  <div class="text-sm font-semibold text-dls-text">Automate your browser</div>
-                  <div class="mt-1 text-xs text-dls-secondary leading-relaxed">
-                    Set up browser actions and run reliable web tasks from OpenWork.
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  class="rounded-2xl border border-dls-border bg-dls-hover p-4 transition-all hover:bg-dls-active hover:border-gray-7"
-                  onClick={() => {
-                    void handleSoulQuickstart();
-                  }}
-                >
-                  <div class="text-sm font-semibold text-dls-text">Give me a soul</div>
-                  <div class="mt-1 text-xs text-dls-secondary leading-relaxed">
-                    Keep your goals and preferences across sessions with light scheduled check-ins.
-                    Tradeoff: more autonomy can create extra background runs, but revert is one command.
-                    Audit setup and heartbeat evidence from the Soul section.
-                  </div>
-                </button>
+              <div class="rounded-2xl border border-gray-6/70 bg-gray-2/40 px-4 py-3 max-w-lg mx-auto">
+                <div class="text-sm font-medium text-gray-11">{t("session.empty_hint_title", currentLocale())}</div>
+                <div class="mt-1 text-xs text-gray-10">
+                  {t("session.empty_hint_description", currentLocale())}
+                </div>
               </div>
             </div>
           </Show>
@@ -3805,7 +3959,7 @@ export default function SessionView(props: SessionViewProps) {
             }}
           >
             <History size={18} />
-            Automations
+            {t("session.nav_automations", currentLocale())}
           </button>
           <button
             type="button"
@@ -3817,7 +3971,7 @@ export default function SessionView(props: SessionViewProps) {
             onClick={() => openSoul()}
           >
             <HeartPulse size={18} class={soulNavIconClass()} />
-            Soul
+            {t("session.nav_soul", currentLocale())}
           </button>
           <button
             type="button"
@@ -3832,7 +3986,7 @@ export default function SessionView(props: SessionViewProps) {
             }}
           >
             <Zap size={18} />
-            Skills
+            {t("session.nav_skills", currentLocale())}
           </button>
           <button
             type="button"
@@ -3847,7 +4001,7 @@ export default function SessionView(props: SessionViewProps) {
             }}
           >
             <Box size={18} />
-            Extensions
+            {t("session.nav_extensions", currentLocale())}
           </button>
           <button
             type="button"
@@ -3862,7 +4016,7 @@ export default function SessionView(props: SessionViewProps) {
             }}
           >
             <MessageCircle size={18} />
-            Messaging
+            {t("session.nav_messaging", currentLocale())}
           </button>
           <Show when={props.developerMode}>
             <button
@@ -3875,7 +4029,7 @@ export default function SessionView(props: SessionViewProps) {
               onClick={openConfig}
             >
               <SlidersHorizontal size={18} />
-              Advanced
+              {t("session.nav_advanced", currentLocale())}
             </button>
           </Show>
           </div>
@@ -4018,11 +4172,14 @@ export default function SessionView(props: SessionViewProps) {
 
       <ConfirmModal
         open={deleteSessionOpen()}
-        title="Delete session?"
+        title={t("session.delete_title", currentLocale())}
         message={
           selectedSessionTitle().trim()
-            ? `This will permanently delete \"${selectedSessionTitle().trim()}\" and its messages.`
-            : "This will permanently delete the selected session and its messages."
+            ? t("session.delete_message_named", currentLocale()).replace(
+                "{title}",
+                selectedSessionTitle().trim()
+              )
+            : t("session.delete_message", currentLocale())
         }
         confirmLabel={deleteSessionBusy() ? "正在删除..." : "删除"}
         cancelLabel="取消"

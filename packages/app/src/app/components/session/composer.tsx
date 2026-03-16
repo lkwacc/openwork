@@ -1738,7 +1738,7 @@ export default function Composer(props: ComposerProps) {
                       class="bg-transparent border-none p-0 pb-8 pr-4 text-gray-12 focus:ring-0 text-[15px] leading-relaxed resize-none min-h-[24px] max-h-40 overflow-y-auto outline-none relative z-10"
                     />
 
-                    <div class="mt-3 flex items-center justify-between px-2 pb-2">
+                    <div class="mt-2 flex items-center justify-between px-2 pb-2">
                       <div class="flex items-center gap-2">
                         <input
                           ref={inboxFileInputRef}

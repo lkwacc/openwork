@@ -5,6 +5,7 @@ import type { OpenworkSoulStatus } from "../../lib/openwork-server";
 import type { WorkspaceInfo } from "../../lib/tauri";
 import type { WorkspaceConnectionState, WorkspaceSessionGroup } from "../../types";
 import { formatRelativeTime, getWorkspaceTaskLoadErrorDisplay, isWindowsPlatform } from "../../utils";
+import { currentLocale, t } from "../../../i18n";
 
 type Props = {
   workspaceSessionGroups: WorkspaceSessionGroup[];
@@ -204,7 +205,7 @@ export default function WorkspaceSessionList(props: Props) {
                         <Show when={soulEnabled()}>
                           <span class="inline-flex items-center gap-1 rounded-full border border-ruby-7 bg-ruby-3 px-1.5 py-0.5 text-[10px] text-ruby-11">
                             <HeartPulse size={10} />
-                            Soul
+                            {t("workspace.soul_badge", currentLocale())}
                           </span>
                         </Show>
                       </div>
@@ -274,9 +275,9 @@ export default function WorkspaceSessionList(props: Props) {
                           props.onOpenRenameWorkspace(workspace().id);
                           setWorkspaceMenuId(null);
                         }}
-                      >
-                        Edit name
-                      </button>
+                        >
+                          {t("workspace.edit_name", currentLocale())}
+                        </button>
                       <button
                         type="button"
                         class="w-full text-left px-2 py-1.5 text-sm rounded-md hover:bg-gray-3"
@@ -284,9 +285,9 @@ export default function WorkspaceSessionList(props: Props) {
                           props.onShareWorkspace(workspace().id);
                           setWorkspaceMenuId(null);
                         }}
-                      >
-                        Share...
-                      </button>
+                        >
+                          {t("workspace.share", currentLocale())}
+                        </button>
                       <button
                         type="button"
                         class="w-full text-left px-2 py-1.5 text-sm rounded-md hover:bg-gray-3"
@@ -294,9 +295,11 @@ export default function WorkspaceSessionList(props: Props) {
                           props.onOpenSoul(workspace().id);
                           setWorkspaceMenuId(null);
                         }}
-                      >
-                        {soulEnabled() ? "Soul settings" : "Enable soul"}
-                      </button>
+                        >
+                          {soulEnabled()
+                            ? t("workspace.soul_settings", currentLocale())
+                            : t("workspace.enable_soul", currentLocale())}
+                        </button>
                       <Show when={workspace().workspaceType === "local"}>
                         <button
                           type="button"
