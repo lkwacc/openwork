@@ -120,3 +120,39 @@ git push origin crow5/dev
 - Upstream `dev` remote head when this workflow was set up: `c85fffaae4a0fa285e2205357924e314e6305088`
 
 Before the first upstream merge, commit or stash the in-progress work on `feature/crow5-current-customizations`.
+
+## First merge rehearsal archive
+
+Date: `2026-03-16`
+
+- Integration branch: `integration/upstream-dev-20260316`
+- Common ancestor: `88aa04086df96e77c33ab871b5b803e151a2aa7b`
+- Result: merge rehearsal ran successfully and exposed the real conflict surface, then was aborted to keep the branch clean
+
+### Conflict files from the first rehearsal
+
+- `packages/app/public/apple-touch-icon.png`
+- `packages/app/public/favicon-16x16.png`
+- `packages/app/public/favicon-32x32.png`
+- `packages/app/src/app/components/session/composer.tsx`
+- `packages/app/src/app/components/session/workspace-session-list.tsx`
+- `packages/app/src/app/components/status-bar.tsx`
+- `packages/app/src/app/pages/dashboard.tsx`
+- `packages/app/src/app/pages/session.tsx`
+- `packages/app/src/app/pages/settings.tsx`
+- `packages/desktop/src-tauri/icons/128x128.png`
+- `packages/desktop/src-tauri/icons/128x128@2x.png`
+- `packages/desktop/src-tauri/icons/32x32.png`
+- `packages/desktop/src-tauri/icons/icon.icns`
+- `packages/desktop/src-tauri/icons/icon.ico`
+- `packages/desktop/src-tauri/icons/icon.png`
+- `packages/desktop/src-tauri/tauri.conf.json`
+- `packages/landing/app/layout.tsx`
+
+### Practical resolution order
+
+1. Resolve branding assets and `tauri.conf.json`
+2. Resolve session-related UI files
+3. Resolve settings/dashboard/status bar files
+4. Resolve landing page branding
+5. Build and verify before merging back into `crow5/dev`
