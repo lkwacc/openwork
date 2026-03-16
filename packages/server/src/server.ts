@@ -2,7 +2,17 @@ import { readFile, writeFile, rm, readdir, rename, stat } from "node:fs/promises
 import { createHash, randomInt } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import type { ApprovalRequest, Capabilities, ServerConfig, WorkspaceInfo, Actor, ReloadReason, ReloadTrigger, TokenScope } from "./types.js";
+import type {
+  ApprovalRequest,
+  Capabilities,
+  ServerConfig,
+  WorkspaceInfo,
+  Actor,
+  ReloadReason,
+  ReloadTrigger,
+  TokenScope,
+  InviteCodeEntry,
+} from "./types.js";
 import { ApprovalService } from "./approvals.js";
 import { addPlugin, listPlugins, normalizePluginSpec, removePlugin } from "./plugins.js";
 import { addMcp, listMcp, removeMcp } from "./mcp.js";
@@ -647,6 +657,338 @@ function jsonResponse(data: unknown, status = 200) {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+const INVITE_ADMIN_HTML = `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Crow5 邀请码管理</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #0b0d10;
+        color: #f3f4f6;
+      }
+      .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 20px 48px; }
+      .hero { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 24px; }
+      .title { font-size: 28px; font-weight: 700; margin: 0 0 8px; }
+      .sub { color: #9ca3af; font-size: 14px; line-height: 1.6; max-width: 720px; }
+      .grid { display: grid; grid-template-columns: 320px 1fr; gap: 20px; }
+      .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+      .card {
+        border: 1px solid rgba(255,255,255,0.08);
+        background: rgba(17,24,39,0.72);
+        border-radius: 18px;
+        padding: 18px;
+        backdrop-filter: blur(10px);
+      }
+      .label { display: block; font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
+      .input {
+        width: 100%; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1);
+        background: #0f172a; color: #f8fafc; padding: 11px 12px; outline: none;
+      }
+      .input:focus { border-color: rgba(96,165,250,0.8); }
+      .row { display: flex; gap: 10px; }
+      .row > * { flex: 1; }
+      .stack { display: flex; flex-direction: column; gap: 14px; }
+      .btn {
+        border: none; border-radius: 12px; padding: 10px 14px; cursor: pointer; font-weight: 600;
+        background: #2563eb; color: white;
+      }
+      .btn.secondary { background: #1f2937; color: #e5e7eb; border: 1px solid rgba(255,255,255,0.08); }
+      .btn.danger { background: #7f1d1d; }
+      .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+      .status { min-height: 20px; font-size: 12px; color: #93c5fd; }
+      .toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+      .toolbar .grow { flex: 1; min-width: 180px; }
+      .stat {
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 14px;
+        padding: 14px;
+        background: rgba(15,23,42,0.72);
+      }
+      .stat .k { color: #9ca3af; font-size: 12px; margin-bottom: 8px; }
+      .stat .v { font-size: 24px; font-weight: 700; }
+      .table { display: flex; flex-direction: column; gap: 10px; }
+      .item {
+        border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 14px;
+        background: rgba(15,23,42,0.72);
+        display: flex; justify-content: space-between; gap: 12px; align-items: center;
+      }
+      .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px; }
+      .meta { color: #9ca3af; font-size: 12px; margin-top: 6px; line-height: 1.5; }
+      .pill {
+        display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 4px 10px;
+        font-size: 12px; border: 1px solid rgba(255,255,255,0.08);
+      }
+      .pill.valid { background: rgba(20,83,45,0.45); color: #86efac; }
+      .pill.used { background: rgba(120,53,15,0.45); color: #fdba74; }
+      .pill.expired { background: rgba(127,29,29,0.45); color: #fca5a5; }
+      .empty { color: #9ca3af; font-size: 13px; padding: 28px 8px; text-align: center; }
+      .actions { display: flex; gap: 8px; align-items: center; }
+      @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } .stats { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="hero">
+        <div>
+          <h1 class="title">Crow5 邀请码管理</h1>
+          <div class="sub">这是独立于 Crow5 客户端的管理端 Demo。用于生成、查看、删除邀请码。每个邀请码只可成功使用一次，且自创建起 15 天后过期。</div>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card stack">
+          <div>
+            <label class="label" for="baseUrl">服务地址</label>
+            <input id="baseUrl" class="input" />
+          </div>
+          <div>
+            <label class="label" for="hostToken">Host Token</label>
+            <input id="hostToken" class="input" placeholder="请输入 host token" />
+            <div class="meta" style="margin-top:8px;">当前 Demo Token：<span class="code">crow5-demo-host</span></div>
+          </div>
+          <div>
+            <label class="label" for="newCode">自定义邀请码（可留空自动生成）</label>
+            <input id="newCode" class="input" placeholder="例如：CROW5-VIP-001" />
+          </div>
+          <div class="row">
+            <button id="loadBtn" class="btn secondary">加载列表</button>
+            <button id="createBtn" class="btn">生成邀请码</button>
+          </div>
+          <div id="status" class="status"></div>
+        </div>
+
+        <div class="card">
+          <div class="stats">
+            <div class="stat">
+              <div class="k">可用</div>
+              <div class="v" id="countValid">0</div>
+            </div>
+            <div class="stat">
+              <div class="k">已使用</div>
+              <div class="v" id="countUsed">0</div>
+            </div>
+            <div class="stat">
+              <div class="k">已过期</div>
+              <div class="v" id="countExpired">0</div>
+            </div>
+          </div>
+          <div class="toolbar">
+            <button id="refreshBtn" class="btn secondary">刷新</button>
+            <button id="copyUrlBtn" class="btn secondary">复制管理页地址</button>
+            <input id="searchInput" class="input grow" placeholder="搜索邀请码" />
+            <select id="statusFilter" class="input" style="max-width:160px;">
+              <option value="all">全部状态</option>
+              <option value="valid">可用</option>
+              <option value="used">已使用</option>
+              <option value="expired">已过期</option>
+            </select>
+          </div>
+          <div id="list" class="table"></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const baseUrlInput = document.getElementById("baseUrl");
+      const hostTokenInput = document.getElementById("hostToken");
+      const newCodeInput = document.getElementById("newCode");
+      const loadBtn = document.getElementById("loadBtn");
+      const createBtn = document.getElementById("createBtn");
+      const refreshBtn = document.getElementById("refreshBtn");
+      const statusEl = document.getElementById("status");
+      const listEl = document.getElementById("list");
+      const countValidEl = document.getElementById("countValid");
+      const countUsedEl = document.getElementById("countUsed");
+      const countExpiredEl = document.getElementById("countExpired");
+      const copyUrlBtn = document.getElementById("copyUrlBtn");
+      const searchInput = document.getElementById("searchInput");
+      const statusFilter = document.getElementById("statusFilter");
+      let allItems = [];
+
+      const BASE_KEY = "crow5.inviteAdmin.baseUrl";
+      const TOKEN_KEY = "crow5.inviteAdmin.hostToken";
+
+      baseUrlInput.value = localStorage.getItem(BASE_KEY) || window.location.origin;
+      hostTokenInput.value = localStorage.getItem(TOKEN_KEY) || "";
+
+      function setStatus(message, tone = "info") {
+        statusEl.textContent = message || "";
+        statusEl.style.color = tone === "error" ? "#fca5a5" : tone === "success" ? "#86efac" : "#93c5fd";
+      }
+
+      function saveConfig() {
+        localStorage.setItem(BASE_KEY, baseUrlInput.value.trim());
+        localStorage.setItem(TOKEN_KEY, hostTokenInput.value.trim());
+      }
+
+      function authHeaders() {
+        saveConfig();
+        return {
+          "Content-Type": "application/json",
+          "X-OpenWork-Host-Token": hostTokenInput.value.trim(),
+        };
+      }
+
+      function apiUrl(path) {
+        return baseUrlInput.value.trim().replace(/\\/+$/, "") + path;
+      }
+
+      function formatDate(value) {
+        if (!value) return "—";
+        return new Date(value).toLocaleString();
+      }
+
+      function render(items) {
+        const validCount = items.filter((item) => item.status === "valid").length;
+        const usedCount = items.filter((item) => item.status === "used").length;
+        const expiredCount = items.filter((item) => item.status === "expired").length;
+        countValidEl.textContent = String(validCount);
+        countUsedEl.textContent = String(usedCount);
+        countExpiredEl.textContent = String(expiredCount);
+
+        if (!items.length) {
+          listEl.innerHTML = '<div class="empty">当前没有邀请码。</div>';
+          return;
+        }
+        listEl.innerHTML = "";
+        for (const item of items) {
+          const row = document.createElement("div");
+          row.className = "item";
+          row.innerHTML = \`
+            <div>
+              <div class="code">\${item.code}</div>
+              <div class="meta">
+                创建：\${formatDate(item.createdAt)}<br/>
+                到期：\${formatDate(item.expiresAt)}<br/>
+                使用：\${item.usedAt ? formatDate(item.usedAt) : "未使用"}\${item.usedBy ? " · " + item.usedBy : ""}
+              </div>
+            </div>
+            <div class="actions">
+              <span class="pill \${item.status}">\${item.status === "valid" ? "可用" : item.status === "used" ? "已使用" : "已过期"}</span>
+              <button class="btn secondary" data-copy="\${item.code}">复制</button>
+              <button class="btn danger" data-delete="\${item.code}">删除</button>
+            </div>
+          \`;
+          listEl.appendChild(row);
+        }
+
+        listEl.querySelectorAll("[data-copy]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            await navigator.clipboard.writeText(button.getAttribute("data-copy") || "");
+            setStatus("邀请码已复制。", "success");
+          });
+        });
+
+        listEl.querySelectorAll("[data-delete]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const code = button.getAttribute("data-delete");
+            if (!code) return;
+            if (!window.confirm(\`确认删除邀请码 \${code}？\`)) return;
+            try {
+              const response = await fetch(apiUrl("/invite-codes/" + encodeURIComponent(code)), {
+                method: "DELETE",
+                headers: authHeaders(),
+              });
+              if (!response.ok) throw new Error("删除失败");
+              setStatus("邀请码已删除。", "success");
+              await loadInvites();
+            } catch (error) {
+              setStatus(error instanceof Error ? error.message : "删除失败", "error");
+            }
+          });
+        });
+      }
+
+      function applyFilters() {
+        const keyword = (searchInput.value || "").trim().toUpperCase();
+        const status = statusFilter.value || "all";
+        const filtered = allItems.filter((item) => {
+          if (status !== "all" && item.status !== status) return false;
+          if (keyword && !item.code.toUpperCase().includes(keyword)) return false;
+          return true;
+        });
+        render(filtered);
+      }
+
+      async function loadInvites() {
+        try {
+          setStatus("正在加载...");
+          const response = await fetch(apiUrl("/invite-codes"), { headers: authHeaders() });
+          const json = await response.json();
+          if (!response.ok) throw new Error(json?.message || "加载失败");
+          allItems = Array.isArray(json.items) ? json.items : [];
+          applyFilters();
+          setStatus("邀请码列表已更新。", "success");
+        } catch (error) {
+          allItems = [];
+          render([]);
+          setStatus(error instanceof Error ? error.message : "加载失败", "error");
+        }
+      }
+
+      async function createInvite() {
+        try {
+          setStatus("正在生成...");
+          const response = await fetch(apiUrl("/invite-codes"), {
+            method: "POST",
+            headers: authHeaders(),
+            body: JSON.stringify(newCodeInput.value.trim() ? { code: newCodeInput.value.trim() } : {}),
+          });
+          const json = await response.json();
+          if (!response.ok) throw new Error(json?.message || "生成失败");
+          newCodeInput.value = "";
+          setStatus("邀请码已生成。", "success");
+          await loadInvites();
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : "生成失败", "error");
+        }
+      }
+
+      loadBtn.addEventListener("click", loadInvites);
+      refreshBtn.addEventListener("click", loadInvites);
+      createBtn.addEventListener("click", createInvite);
+      searchInput.addEventListener("input", applyFilters);
+      statusFilter.addEventListener("change", applyFilters);
+      copyUrlBtn.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(apiUrl("/invite-admin"));
+        setStatus("管理页地址已复制。", "success");
+      });
+      window.addEventListener("load", loadInvites);
+    </script>
+  </body>
+</html>`;
+
+function normalizeInviteCode(value: unknown): string {
+  return typeof value === "string" ? value.trim().toUpperCase() : "";
+}
+
+function getInviteCodeStatus(entry: InviteCodeEntry, now = Date.now()): "valid" | "used" | "expired" {
+  if (typeof entry.usedAt === "number" && entry.usedAt > 0) return "used";
+  if (entry.expiresAt <= now) return "expired";
+  return "valid";
+}
+
+async function consumeInviteCode(config: ServerConfig, code: string, actorId: string) {
+  const entry = config.inviteCodes.find((item) => item.code === code);
+  if (!entry) return { valid: false, status: "missing" as const };
+  const status = getInviteCodeStatus(entry);
+  if (status !== "valid") return { valid: false, status };
+
+  entry.usedAt = Date.now();
+  entry.usedBy = actorId;
+  const configPath = config.configPath?.trim() ?? "";
+  if (configPath) {
+    await persistInviteCodes(configPath, config.inviteCodes);
+  }
+  return { valid: true, status: "valid" as const, entry };
 }
 
 function opencodeRouterDebugEnabled(): boolean {
@@ -1308,6 +1650,10 @@ function createRoutes(config: ServerConfig, approvals: ApprovalService, tokens: 
     return htmlResponse(TOY_UI_HTML);
   });
 
+  addRoute(routes, "GET", "/invite-admin", "none", async () => {
+    return htmlResponse(INVITE_ADMIN_HTML);
+  });
+
   addRoute(routes, "GET", "/w/:id/ui", "none", async () => {
     if (!resolveToyUiEnabled()) {
       throw new ApiError(404, "ui_disabled", "Toy UI is disabled");
@@ -1394,6 +1740,89 @@ function createRoutes(config: ServerConfig, approvals: ApprovalService, tokens: 
 
   addRoute(routes, "GET", "/capabilities", "client", async () => {
     return jsonResponse(buildCapabilities(config));
+  });
+
+  addRoute(routes, "POST", "/invite/validate", "none", async (ctx) => {
+    const body = await readJsonBody(ctx.request);
+    const code = normalizeInviteCode(body.code);
+    const consume = body.consume === true;
+    if (!code) {
+      throw new ApiError(400, "invalid_invite_code", "Invite code is required");
+    }
+
+    let valid = false;
+    let status: "valid" | "used" | "expired" | "missing" = "missing";
+    if (consume) {
+      const actorId = typeof body.clientId === "string" && body.clientId.trim() ? body.clientId.trim() : "anonymous";
+      const result = await consumeInviteCode(ctx.config, code, actorId);
+      valid = result.valid;
+      status = result.status;
+    } else {
+      const entry = ctx.config.inviteCodes.find((item) => item.code === code);
+      if (entry) {
+        status = getInviteCodeStatus(entry);
+        valid = status === "valid";
+      }
+    }
+    return jsonResponse({
+      ok: true,
+      valid,
+      code,
+      status,
+      consume,
+      required: true,
+      source: "openwork-server",
+    });
+  });
+
+  addRoute(routes, "GET", "/invite-codes", "host", async (ctx) => {
+    return jsonResponse({
+      items: ctx.config.inviteCodes.map((entry) => ({
+        code: entry.code,
+        createdAt: entry.createdAt,
+        expiresAt: entry.expiresAt,
+        usedAt: entry.usedAt ?? null,
+        usedBy: entry.usedBy ?? null,
+        status: getInviteCodeStatus(entry),
+      })),
+    });
+  });
+
+  addRoute(routes, "POST", "/invite-codes", "host", async (ctx) => {
+    const body = await readJsonBody(ctx.request);
+    const requestedCode = normalizeInviteCode(body.code);
+    const now = Date.now();
+    const code =
+      requestedCode ||
+      `CROW5-${Math.random().toString(36).slice(2, 6).toUpperCase()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    if (ctx.config.inviteCodes.some((item) => item.code === code)) {
+      throw new ApiError(409, "invite_exists", "Invite code already exists");
+    }
+    const entry: InviteCodeEntry = {
+      code,
+      createdAt: now,
+      expiresAt: now + 15 * 24 * 60 * 60 * 1000,
+    };
+    ctx.config.inviteCodes.unshift(entry);
+    const configPath = ctx.config.configPath?.trim() ?? "";
+    if (configPath) {
+      await persistInviteCodes(configPath, ctx.config.inviteCodes);
+    }
+    return jsonResponse({ ok: true, item: { ...entry, usedAt: null, usedBy: null, status: "valid" } }, 201);
+  });
+
+  addRoute(routes, "DELETE", "/invite-codes/:code", "host", async (ctx) => {
+    const code = normalizeInviteCode(ctx.params.code);
+    const next = ctx.config.inviteCodes.filter((item) => item.code !== code);
+    if (next.length === ctx.config.inviteCodes.length) {
+      throw new ApiError(404, "invite_not_found", "Invite code not found");
+    }
+    ctx.config.inviteCodes.splice(0, ctx.config.inviteCodes.length, ...next);
+    const configPath = ctx.config.configPath?.trim() ?? "";
+    if (configPath) {
+      await persistInviteCodes(configPath, ctx.config.inviteCodes);
+    }
+    return jsonResponse({ ok: true });
   });
 
   addRoute(routes, "GET", "/workspaces", "client", async () => {
@@ -3856,6 +4285,7 @@ function ensurePlainObject(value: unknown): Record<string, unknown> {
 type OpenworkServerConfigFile = Record<string, unknown> & {
   workspaces?: Array<Record<string, unknown>>;
   authorizedRoots?: string[];
+  inviteCodes?: Array<string | Partial<InviteCodeEntry>>;
 };
 
 async function persistWorkspaceDeletion(configPath: string, workspaceId: string, workspacePath: string): Promise<boolean> {
@@ -3920,6 +4350,53 @@ async function persistWorkspaceDeletion(configPath: string, workspaceId: string,
   const tmpPath = `${configPath}.tmp.${shortId()}`;
   try {
     await writeFile(tmpPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+    await rename(tmpPath, configPath);
+    return true;
+  } finally {
+    try {
+      await rm(tmpPath);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function persistInviteCodes(configPath: string, inviteCodes: InviteCodeEntry[]): Promise<boolean> {
+  if (!configPath.trim()) return false;
+  if (!(await exists(configPath))) return false;
+
+  let raw = "";
+  try {
+    raw = await readFile(configPath, "utf8");
+  } catch (error) {
+    throw new ApiError(500, "server_config_read_failed", "Failed to read server config", {
+      path: configPath,
+      error: String(error),
+    });
+  }
+
+  let parsed: OpenworkServerConfigFile;
+  try {
+    parsed = ensurePlainObject(JSON.parse(raw)) as OpenworkServerConfigFile;
+  } catch (error) {
+    throw new ApiError(422, "invalid_json", "Failed to parse server config", {
+      path: configPath,
+      error: String(error),
+    });
+  }
+
+  parsed.inviteCodes = inviteCodes.map((entry) => ({
+    code: entry.code,
+    createdAt: entry.createdAt,
+    expiresAt: entry.expiresAt,
+    ...(typeof entry.usedAt === "number" ? { usedAt: entry.usedAt } : {}),
+    ...(entry.usedBy ? { usedBy: entry.usedBy } : {}),
+  }));
+
+  await ensureDir(dirname(configPath));
+  const tmpPath = `${configPath}.tmp.${shortId()}`;
+  try {
+    await writeFile(tmpPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
     await rename(tmpPath, configPath);
     return true;
   } finally {

@@ -7,8 +7,11 @@ import Button from "../components/button";
 import OnboardingWorkspaceSelector from "../components/onboarding-workspace-selector";
 import OpenWorkLogo from "../components/openwork-logo";
 import TextInput from "../components/text-input";
+import { createOpenworkServerClient } from "../lib/openwork-server";
 import { isTauriRuntime, isWindowsPlatform } from "../utils/index";
 import { currentLocale, t } from "../../i18n";
+
+const INVITE_CODE_STORAGE_KEY = "openwork.crow5InviteCode";
 
 export type OnboardingViewProps = {
   startupPreference: StartupPreference | null;
@@ -72,6 +75,96 @@ export default function OnboardingView(props: OnboardingViewProps) {
   const translate = (key: string) => t(key, currentLocale());
   const [openworkTokenVisible, setOpenworkTokenVisible] = createSignal(false);
   const [connectingFallbackVisible, setConnectingFallbackVisible] = createSignal(false);
+  const [inviteCodeInput, setInviteCodeInput] = createSignal("");
+  const [inviteCodeError, setInviteCodeError] = createSignal("");
+  const [inviteCodeUnlocked, setInviteCodeUnlocked] = createSignal(false);
+  const [inviteCodeBusy, setInviteCodeBusy] = createSignal(false);
+
+  const allowedInviteCodes = () => {
+    const envRaw =
+      typeof import.meta !== "undefined" && import.meta.env?.VITE_OPENWORK_INVITE_CODES
+        ? String(import.meta.env.VITE_OPENWORK_INVITE_CODES)
+        : "CROW5,HELLO-CROW5,NETRAIN";
+    return envRaw
+      .split(",")
+      .map((item) => item.trim().toUpperCase())
+      .filter(Boolean);
+  };
+
+  const normalizeInviteCode = (value: string) => value.trim().toUpperCase();
+
+  const validateInviteCodeLocal = (code: string) => allowedInviteCodes().includes(code);
+
+  const getInviteClientId = () => {
+    if (typeof window === "undefined") return "crow5-client";
+    const key = "openwork.crow5InviteClientId";
+    const existing = window.localStorage.getItem(key)?.trim();
+    if (existing) return existing;
+    const next =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `crow5-${Date.now()}`;
+    window.localStorage.setItem(key, next);
+    return next;
+  };
+
+  const validateInviteCodeRemote = async (code: string, consume = false) => {
+    const baseUrl = props.openworkHostUrl.trim().replace(/\/+$/, "");
+    if (!baseUrl) return null;
+    try {
+      const client = createOpenworkServerClient({
+        baseUrl,
+        token: props.openworkToken.trim() || undefined,
+      });
+      return await client.validateInviteCode(code, { consume, clientId: getInviteClientId() });
+    } catch {
+      return null;
+    }
+  };
+
+  const activateInviteCode = async () => {
+    const normalized = normalizeInviteCode(inviteCodeInput());
+    if (!normalized) {
+      setInviteCodeError(translate("onboarding.invite_invalid"));
+      setInviteCodeUnlocked(false);
+      return;
+    }
+
+    setInviteCodeBusy(true);
+    const remoteResult = await validateInviteCodeRemote(normalized, true);
+    const hasServer = props.openworkHostUrl.trim().length > 0;
+    const valid = remoteResult?.valid ?? (!hasServer && validateInviteCodeLocal(normalized));
+    setInviteCodeBusy(false);
+    if (!valid) {
+      const nextError =
+        remoteResult?.status === "used"
+          ? translate("onboarding.invite_used")
+          : remoteResult?.status === "expired"
+            ? translate("onboarding.invite_expired")
+            : translate("onboarding.invite_invalid");
+      setInviteCodeError(nextError);
+      setInviteCodeUnlocked(false);
+      return;
+    }
+
+    setInviteCodeError("");
+    setInviteCodeUnlocked(true);
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(INVITE_CODE_STORAGE_KEY, normalized);
+      } catch {
+        // ignore storage failures
+      }
+    }
+  };
+
+  const guardInvite = (onAllowed: () => void) => {
+    if (inviteCodeUnlocked()) {
+      onAllowed();
+      return;
+    }
+    setInviteCodeError(translate("onboarding.invite_required"));
+  };
 
   createEffect(() => {
     if (typeof window === "undefined") return;
@@ -82,6 +175,17 @@ export default function OnboardingView(props: OnboardingViewProps) {
     setConnectingFallbackVisible(false);
     const timer = window.setTimeout(() => setConnectingFallbackVisible(true), 4_000);
     onCleanup(() => window.clearTimeout(timer));
+  });
+
+  createEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = normalizeInviteCode(window.localStorage.getItem(INVITE_CODE_STORAGE_KEY) ?? "");
+    if (!stored) return;
+    setInviteCodeInput(stored);
+    if (allowedInviteCodes().includes(stored)) {
+      setInviteCodeUnlocked(true);
+      setInviteCodeError("");
+    }
   });
 
   const engineDoctorAvailable = () =>
@@ -217,9 +321,15 @@ export default function OnboardingView(props: OnboardingViewProps) {
               <div class="rounded-2xl border border-gray-6 bg-gray-1/50 px-4 py-3">
                 <div class="flex items-center justify-between gap-4">
                   <div class="min-w-0">
-                    <div class="text-xs font-semibold text-gray-10 uppercase tracking-wider">Import</div>
-                    <div class="mt-1 text-sm text-gray-12">Use an existing workspace config.</div>
-                    <div class="text-xs text-gray-10">Imports `.opencode` and `opencode.json` only.</div>
+                    <div class="text-xs font-semibold text-gray-10 uppercase tracking-wider">
+                      {translate("onboarding.import_title")}
+                    </div>
+                    <div class="mt-1 text-sm text-gray-12">
+                      {translate("onboarding.import_description")}
+                    </div>
+                    <div class="text-xs text-gray-10">
+                      {translate("onboarding.import_files_hint")}
+                    </div>
                   </div>
                   <Button
                     variant="secondary"
@@ -227,7 +337,7 @@ export default function OnboardingView(props: OnboardingViewProps) {
                     onClick={props.onImportWorkspaceConfig}
                     disabled={props.importingWorkspaceConfig || props.busy}
                   >
-                    Import config
+                    {translate("onboarding.import_button")}
                   </Button>
                 </div>
               </div>
@@ -600,9 +710,39 @@ export default function OnboardingView(props: OnboardingViewProps) {
             </div>
 
             <div class="space-y-4">
+              <div class="rounded-3xl border border-gray-6 bg-gray-2/60 p-5 md:p-6">
+                <div class="text-sm font-semibold text-gray-12">{translate("onboarding.invite_title")}</div>
+                <div class="mt-1 text-xs text-gray-10">{translate("onboarding.invite_description")}</div>
+                <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+                  <TextInput
+                    label={translate("onboarding.invite_label")}
+                    placeholder={translate("onboarding.invite_placeholder")}
+                    value={inviteCodeInput()}
+                    onInput={(event) => {
+                      setInviteCodeInput(event.currentTarget.value);
+                      if (inviteCodeError()) setInviteCodeError("");
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter") return;
+                      event.preventDefault();
+                      void activateInviteCode();
+                    }}
+                    class="sm:flex-1"
+                  />
+                  <Button variant="secondary" class="h-10 px-4" onClick={() => void activateInviteCode()} disabled={inviteCodeBusy()}>
+                    {inviteCodeBusy() ? translate("onboarding.invite_checking") : translate("onboarding.invite_activate")}
+                  </Button>
+                </div>
+                <div class={`mt-2 text-xs ${inviteCodeError() ? "text-red-11" : "text-emerald-11"}`}>
+                  {inviteCodeError() || (inviteCodeUnlocked() ? translate("onboarding.invite_valid") : "")}
+                </div>
+              </div>
+
               <button
-                onClick={() => props.onSelectStartup("local")}
+                onClick={() => guardInvite(() => props.onSelectStartup("local"))}
+                disabled={!inviteCodeUnlocked()}
                 class="group w-full relative bg-gray-2 hover:bg-gray-4 border border-gray-6 hover:border-gray-7 p-6 md:p-8 rounded-3xl text-left transition-all duration-300 hover:shadow-2xl hover:shadow-indigo-6/10 hover:-translate-y-0.5 flex items-start gap-6"
+                classList={{ "opacity-70 cursor-not-allowed": !inviteCodeUnlocked() }}
               >
                 <div class="shrink-0 w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-7/20 to-purple-7/20 flex items-center justify-center border border-indigo-7/20 group-hover:border-indigo-7/40 transition-colors">
                   <Circle size={18} class="text-indigo-11" />
@@ -639,8 +779,10 @@ export default function OnboardingView(props: OnboardingViewProps) {
               </Show>
 
               <button
-                onClick={() => props.onSelectStartup("server")}
+                onClick={() => guardInvite(() => props.onSelectStartup("server"))}
+                disabled={!inviteCodeUnlocked()}
                 class="group w-full relative bg-gray-2 hover:bg-gray-4 border border-gray-6 hover:border-gray-7 p-6 md:p-8 rounded-3xl text-left transition-all duration-300 hover:shadow-2xl hover:shadow-gray-12/10 hover:-translate-y-0.5 flex items-start gap-6"
+                classList={{ "opacity-70 cursor-not-allowed": !inviteCodeUnlocked() }}
               >
                 <div class="shrink-0 w-14 h-14 rounded-2xl bg-gradient-to-br from-gray-7/20 to-gray-5/10 flex items-center justify-center border border-gray-6 group-hover:border-gray-7 transition-colors">
                   <Globe size={18} class="text-gray-11" />

@@ -25,6 +25,7 @@ function createTestConfig(): ServerConfig {
     hostTokenSource: "generated",
     logFormat: "pretty",
     logRequests: false,
+    inviteCodes: [{ code: "CROW5", createdAt: Date.now(), expiresAt: Date.now() + 15 * 24 * 60 * 60 * 1000 }],
   };
 }
 

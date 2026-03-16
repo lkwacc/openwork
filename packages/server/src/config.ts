@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import type { ApprovalMode, ApprovalConfig, ServerConfig, WorkspaceConfig, LogFormat } from "./types.js";
+import type { ApprovalMode, ApprovalConfig, ServerConfig, WorkspaceConfig, LogFormat, InviteCodeEntry } from "./types.js";
 import { buildWorkspaceInfos } from "./workspaces.js";
 import { parseList, readJsonFile, shortId } from "./utils.js";
 
@@ -40,6 +40,7 @@ interface FileConfig {
   opencodePassword?: string;
   logFormat?: LogFormat;
   logRequests?: boolean;
+  inviteCodes?: Array<string | Partial<InviteCodeEntry>>;
 }
 
 const DEFAULT_PORT = 8787;
@@ -62,6 +63,45 @@ function parseBoolean(value: string | undefined): boolean | undefined {
   if (["true", "1", "yes", "on"].includes(normalized)) return true;
   if (["false", "0", "no", "off"].includes(normalized)) return false;
   return undefined;
+}
+
+const INVITE_CODE_TTL_MS = 15 * 24 * 60 * 60 * 1000;
+
+function normalizeInviteCodes(values: Array<string | Partial<InviteCodeEntry>> | undefined | null): InviteCodeEntry[] {
+  if (!Array.isArray(values)) return [];
+  const now = Date.now();
+  const items: InviteCodeEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const value of values) {
+    const code =
+      typeof value === "string"
+        ? value.trim().toUpperCase()
+        : typeof value?.code === "string"
+          ? value.code.trim().toUpperCase()
+          : "";
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    const createdAt =
+      typeof value === "object" && typeof value?.createdAt === "number" && Number.isFinite(value.createdAt)
+        ? Math.trunc(value.createdAt)
+        : now;
+    const expiresAt =
+      typeof value === "object" && typeof value?.expiresAt === "number" && Number.isFinite(value.expiresAt)
+        ? Math.trunc(value.expiresAt)
+        : createdAt + INVITE_CODE_TTL_MS;
+    const usedAt =
+      typeof value === "object" && typeof value?.usedAt === "number" && Number.isFinite(value.usedAt)
+        ? Math.trunc(value.usedAt)
+        : undefined;
+    const usedBy =
+      typeof value === "object" && typeof value?.usedBy === "string" && value.usedBy.trim()
+        ? value.usedBy.trim()
+        : undefined;
+    items.push({ code, createdAt, expiresAt, ...(usedAt ? { usedAt } : {}), ...(usedBy ? { usedBy } : {}) });
+  }
+
+  return items;
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -302,6 +342,13 @@ export async function resolveServerConfig(cli: CliArgs): Promise<ServerConfig> {
 
   const envLogRequests = parseBoolean(process.env.OPENWORK_LOG_REQUESTS);
   const logRequests = cli.logRequests ?? envLogRequests ?? fileConfig.logRequests ?? DEFAULT_LOG_REQUESTS;
+  const envInviteCodes = normalizeInviteCodes(parseList(process.env.OPENWORK_INVITE_CODES));
+  const fileInviteCodes = normalizeInviteCodes(fileConfig.inviteCodes);
+  const resolvedInviteCodes = envInviteCodes.length > 0
+    ? envInviteCodes
+    : fileInviteCodes.length > 0
+      ? fileInviteCodes
+      : normalizeInviteCodes(["CROW5", "HELLO-CROW5", "NETRAIN"]);
 
   const authorizedRoots =
     fileConfig.authorizedRoots?.length
@@ -327,5 +374,6 @@ export async function resolveServerConfig(cli: CliArgs): Promise<ServerConfig> {
     hostTokenSource,
     logFormat,
     logRequests,
+    inviteCodes: resolvedInviteCodes,
   };
 }

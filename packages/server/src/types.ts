@@ -42,6 +42,14 @@ export interface ApprovalConfig {
   timeoutMs: number;
 }
 
+export interface InviteCodeEntry {
+  code: string;
+  createdAt: number;
+  expiresAt: number;
+  usedAt?: number;
+  usedBy?: string;
+ }
+
 export interface ServerConfig {
   host: string;
   port: number;
@@ -58,6 +66,7 @@ export interface ServerConfig {
   hostTokenSource: "cli" | "env" | "file" | "generated";
   logFormat: LogFormat;
   logRequests: boolean;
+  inviteCodes: InviteCodeEntry[];
 }
 
 export interface Capabilities {

@@ -76,6 +76,25 @@ export type OpenworkWorkspaceList = {
   activeId?: string | null;
 };
 
+export type OpenworkInviteValidationResult = {
+  ok: boolean;
+  valid: boolean;
+  code: string;
+  status: "valid" | "used" | "expired" | "missing";
+  consume?: boolean;
+  required: boolean;
+  source: "openwork-server";
+};
+
+export type OpenworkInviteCodeItem = {
+  code: string;
+  createdAt: number;
+  expiresAt: number;
+  usedAt: number | null;
+  usedBy: string | null;
+  status: "valid" | "used" | "expired";
+};
+
 export type OpenworkPluginItem = {
   spec: string;
   source: "config" | "dir.project" | "dir.global";
@@ -1166,6 +1185,7 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
     workspaceExport: 30_000,
     workspaceImport: 30_000,
     binary: 60_000,
+    invite: 5_000,
   };
 
   return {
@@ -1175,6 +1195,33 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
       requestJson<{ ok: boolean; version: string; uptimeMs: number }>(baseUrl, "/health", { token, hostToken, timeoutMs: timeouts.health }),
     status: () => requestJson<OpenworkServerDiagnostics>(baseUrl, "/status", { token, hostToken, timeoutMs: timeouts.status }),
     capabilities: () => requestJson<OpenworkServerCapabilities>(baseUrl, "/capabilities", { token, hostToken, timeoutMs: timeouts.capabilities }),
+    validateInviteCode: (code: string, options?: { consume?: boolean; clientId?: string }) =>
+      requestJson<OpenworkInviteValidationResult>(baseUrl, "/invite/validate", {
+        method: "POST",
+        body: { code, consume: options?.consume === true, clientId: options?.clientId ?? null },
+        timeoutMs: timeouts.invite,
+      }),
+    listInviteCodes: () =>
+      requestJson<{ items: OpenworkInviteCodeItem[] }>(baseUrl, "/invite-codes", {
+        token,
+        hostToken,
+        timeoutMs: timeouts.invite,
+      }),
+    createInviteCode: (code?: string) =>
+      requestJson<{ ok: boolean; item: OpenworkInviteCodeItem }>(baseUrl, "/invite-codes", {
+        method: "POST",
+        token,
+        hostToken,
+        body: code?.trim() ? { code } : {},
+        timeoutMs: timeouts.invite,
+      }),
+    deleteInviteCode: (code: string) =>
+      requestJson<{ ok: boolean }>(baseUrl, `/invite-codes/${encodeURIComponent(code)}`, {
+        method: "DELETE",
+        token,
+        hostToken,
+        timeoutMs: timeouts.invite,
+      }),
     opencodeRouterHealth: () =>
       requestJsonRaw<OpenworkOpenCodeRouterHealthSnapshot>(baseUrl, "/opencode-router/health", { token, hostToken, timeoutMs: timeouts.opencodeRouter }),
     opencodeRouterBindings: (filters?: { channel?: string; identityId?: string }) => {
