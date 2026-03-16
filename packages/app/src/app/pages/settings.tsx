@@ -174,11 +174,6 @@ export default function SettingsView(props: SettingsViewProps) {
     if (/^https?:\/\//i.test(trimmed)) return trimmed;
     return `http://${trimmed}`;
   };
-  const inviteAdminUrl = createMemo(() => {
-    const baseUrl = props.openworkServerUrl.trim().replace(/\/+$/, "");
-    if (!baseUrl) return "";
-    return `${baseUrl}/invite-admin`;
-  });
 
   const handlePickEngineBinary = async () => {
     if (!isTauriRuntime()) return;
@@ -981,11 +976,9 @@ export default function SettingsView(props: SettingsViewProps) {
                   <Show when={inviteCodeStatus()}>
                     <div class="text-xs text-gray-10">{inviteCodeStatus()}</div>
                   </Show>
-                  <Show when={inviteAdminUrl()}>
-                    <div class="text-[11px] text-gray-8 break-all">
-                      {translate("settings.invite_admin_hint").replace("{url}", inviteAdminUrl())}
-                    </div>
-                  </Show>
+                  <div class="text-[11px] text-gray-8 break-all">
+                    {translate("settings.invite_admin_hint")}
+                  </div>
                 </div>
 
                 <div class="rounded-xl border border-gray-6 bg-gray-1 p-4 space-y-3">

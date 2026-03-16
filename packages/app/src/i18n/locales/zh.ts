@@ -629,7 +629,7 @@ export default {
   "settings.crow5_hint": "管理当前设备的邀请码与浏览器预览默认地址。邀请码生成/删除请使用独立管理页。",
   "settings.invite_title": "邀请码",
   "settings.invite_hint": "保存当前设备使用的邀请码，便于后续重新进入启动流程。",
-  "settings.invite_admin_hint": "邀请码生成与删除请使用独立管理页：{url}",
+  "settings.invite_admin_hint": "邀请码生成与删除请使用独立的 Crow5 Invite Admin 项目。",
   "settings.invite_label": "当前邀请码",
   "settings.invite_placeholder": "例如：CROW5",
   "settings.invite_saved": "邀请码已保存。",

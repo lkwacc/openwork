@@ -673,7 +673,7 @@ export default {
   "settings.crow5_hint": "Manage the local invite code and default browser preview address. Use the standalone admin page for invite generation and deletion.",
   "settings.invite_title": "Invite Code",
   "settings.invite_hint": "Store the invite code used on this device for future startup flows.",
-  "settings.invite_admin_hint": "Use the standalone admin page for invite generation and deletion: {url}",
+  "settings.invite_admin_hint": "Use the standalone Crow5 Invite Admin project for invite generation and deletion.",
   "settings.invite_label": "Current invite code",
   "settings.invite_placeholder": "e.g. CROW5",
   "settings.invite_saved": "Invite code saved.",
