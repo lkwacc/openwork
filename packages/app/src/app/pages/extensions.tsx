@@ -128,6 +128,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
             showHeader={false}
             busy={props.busy}
             activeWorkspaceRoot={props.activeWorkspaceRoot}
+            isRemoteWorkspace={props.isRemoteWorkspace}
             mcpServers={props.mcpServers}
             mcpStatus={props.mcpStatus}
             mcpLastUpdatedAt={props.mcpLastUpdatedAt}
@@ -137,6 +138,7 @@ export default function ExtensionsView(props: ExtensionsViewProps) {
             setSelectedMcp={props.setSelectedMcp}
             quickConnect={props.quickConnect}
             connectMcp={props.connectMcp}
+            authorizeMcp={props.authorizeMcp}
             logoutMcpAuth={props.logoutMcpAuth}
             removeMcp={props.removeMcp}
             showMcpReloadBanner={props.showMcpReloadBanner}

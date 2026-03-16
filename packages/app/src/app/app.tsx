@@ -32,8 +32,11 @@ import ResetModal from "./components/reset-modal";
 import WorkspaceSwitchOverlay from "./components/workspace-switch-overlay";
 import CreateRemoteWorkspaceModal from "./components/create-remote-workspace-modal";
 import CreateWorkspaceModal from "./components/create-workspace-modal";
+import SharedSkillDestinationModal from "./components/shared-skill-destination-modal";
+import SharedBundleImportModal from "./components/shared-bundle-import-modal";
 import RenameWorkspaceModal from "./components/rename-workspace-modal";
 import McpAuthModal from "./components/mcp-auth-modal";
+import StatusToast from "./components/status-toast";
 import OnboardingView from "./pages/onboarding";
 import DashboardView from "./pages/dashboard";
 import SessionView from "./pages/session";
@@ -62,10 +65,17 @@ import {
   VARIANT_PREF_KEY,
 } from "./constants";
 import { parseMcpServersFromContent, removeMcpFromConfig, validateMcpServerName } from "./mcp";
+import {
+  compareProviders,
+  mapConfigProvidersToList,
+  providerPriorityRank,
+} from "./utils/providers";
+import { SYNTHETIC_SESSION_ERROR_MESSAGE_PREFIX } from "./types";
 import type {
   Client,
   DashboardTab,
   MessageWithParts,
+  PlaceholderAssistantMessage,
   StartupPreference,
   EngineRuntime,
   ModelOption,
@@ -88,9 +98,11 @@ import type {
   ComposerDraft,
   ComposerPart,
   ProviderListItem,
+  SessionErrorTurn,
   UpdateHandle,
   OpencodeConnectStatus,
   ScheduledJob,
+  WorkspacePreset,
 } from "./types";
 import {
   clearStartupPreference,
@@ -127,7 +139,19 @@ import {
 } from "./theme";
 import { createSystemState } from "./system-state";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { createSessionStore } from "./context/session";
+
+const fileToDataUrl = (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Failed to read attachment: ${file.name}`));
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      resolve(result);
+    };
+    reader.readAsDataURL(file);
+  });
 import { createExtensionsStore } from "./context/extensions";
 import { useGlobalSync } from "./context/global-sync";
 import { createWorkspaceStore } from "./context/workspace";
@@ -144,6 +168,7 @@ import {
   type OrchestratorStatus,
   type OpenworkServerInfo,
   type OpenCodeRouterInfo,
+  type WorkspaceInfo,
 } from "./lib/tauri";
 import {
   FONT_ZOOM_STEP,
@@ -167,8 +192,6 @@ import {
   writeOpenworkServerSettings,
   clearOpenworkServerSettings,
   type OpenworkAuditEntry,
-  type OpenworkSoulHeartbeatEntry,
-  type OpenworkSoulStatus,
   type OpenworkServerCapabilities,
   type OpenworkServerDiagnostics,
   type OpenworkServerStatus,
@@ -231,12 +254,74 @@ type SharedBundleDeepLink = {
   label?: string;
 };
 
+type SharedBundleCreateWorkerRequest = {
+  request: SharedBundleDeepLink;
+  bundle: SharedBundleV1;
+  defaultPreset: WorkspacePreset;
+};
+
+type SharedSkillDestinationRequest = {
+  request: SharedBundleDeepLink;
+  bundle: SharedSkillBundleV1;
+};
+
+type SharedSkillSuccessToast = {
+  title: string;
+  description: string;
+};
+
+type SharedBundleImportTarget = {
+  workspaceId?: string | null;
+  localRoot?: string | null;
+  directoryHint?: string | null;
+};
+
+type SharedBundleImportChoice = {
+  request: SharedBundleDeepLink;
+  bundle: SharedBundleV1;
+};
+
+type SettingsReturnTarget = {
+  view: View;
+  tab: DashboardTab;
+  sessionId: string | null;
+};
+
 function normalizeSharedBundleImportIntent(value: string | null | undefined): SharedBundleImportIntent {
   const normalized = (value ?? "").trim().toLowerCase();
   if (normalized === "new_worker" || normalized === "new-worker" || normalized === "newworker") {
     return "new_worker";
   }
   return "import_current";
+}
+
+function describeSharedBundleImport(bundle: SharedBundleV1): { title: string; description: string; items: string[] } {
+  if (bundle.type === "skill") {
+    return {
+      title: "Import 1 skill",
+      description: bundle.description?.trim() || `Add \`${bundle.name}\` to an existing worker or create a new one for it.`,
+      items: [bundle.name],
+    };
+  }
+
+  if (bundle.type === "skills-set") {
+    const count = bundle.skills.length;
+    return {
+      title: `Import ${count} skill${count === 1 ? "" : "s"}`,
+      description:
+        bundle.description?.trim() ||
+        `${bundle.name || "Shared skills"} is ready to import into an existing worker or a new worker.`,
+      items: bundle.skills.map((skill) => skill.name),
+    };
+  }
+
+  return {
+    title: "Import workspace bundle",
+    description:
+      bundle.description?.trim() ||
+      `Create a new worker to import ${bundle.name || "this shared workspace bundle"}.`,
+    items: Array.isArray(bundle.workspace.skills) ? bundle.workspace.skills.map((skill) => skill.name) : [],
+  };
 }
 
 function readRecord(value: unknown): Record<string, unknown> | null {
@@ -340,15 +425,27 @@ async function fetchSharedBundle(bundleUrl: string): Promise<SharedBundleV1> {
   const timeout = window.setTimeout(() => controller.abort(), 15_000);
 
   try {
-    const response = await fetch(targetUrl.toString(), {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
+    let response: Response;
+    try {
+      response = isTauriRuntime()
+        ? await tauriFetch(targetUrl.toString(), {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            signal: controller.signal,
+          })
+        : await fetch(targetUrl.toString(), {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            signal: controller.signal,
+          });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : safeStringify(error);
+      throw new Error(`Failed to load shared bundle from ${targetUrl.toString()}: ${message}`);
+    }
     if (!response.ok) {
       const details = (await response.text()).trim();
       const suffix = details ? `: ${details}` : "";
-      throw new Error(`Failed to fetch bundle (${response.status})${suffix}`);
+      throw new Error(`Failed to fetch bundle from ${targetUrl.toString()} (${response.status})${suffix}`);
     }
     return parseSharedBundle(await response.json());
   } finally {
@@ -419,7 +516,7 @@ function parseSharedBundleDeepLink(rawUrl: string): SharedBundleDeepLink | null 
   }
 
   const protocol = url.protocol.toLowerCase();
-  if (protocol !== "openwork:" && protocol !== "https:" && protocol !== "http:") {
+  if (protocol !== "openwork:" && protocol !== "openwork-dev:" && protocol !== "https:" && protocol !== "http:") {
     return null;
   }
 
@@ -442,6 +539,25 @@ function parseSharedBundleDeepLink(rawUrl: string): SharedBundleDeepLink | null 
   }
 
   try {
+    if ((protocol === "https:" || protocol === "http:") && !rawBundleUrl.trim()) {
+      const host = url.hostname.toLowerCase();
+      const path = url.pathname.replace(/^\/+/, "");
+      const segments = path.split("/").filter(Boolean);
+      if ((host === "share.openwork.software" || host.endsWith(".openwork.software")) && segments[0] === "b" && segments[1]) {
+        const intent = normalizeSharedBundleImportIntent(url.searchParams.get("ow_intent") ?? url.searchParams.get("intent"));
+        const source = url.searchParams.get("ow_source")?.trim() ?? url.searchParams.get("source")?.trim() ?? "";
+        const orgId = url.searchParams.get("ow_org")?.trim() ?? "";
+        const label = url.searchParams.get("ow_label")?.trim() ?? url.searchParams.get("label")?.trim() ?? "";
+        return {
+          bundleUrl: url.toString(),
+          intent,
+          source: source || undefined,
+          orgId: orgId || undefined,
+          label: label || undefined,
+        };
+      }
+    }
+
     const parsedBundleUrl = new URL(rawBundleUrl.trim());
     if (parsedBundleUrl.protocol !== "https:" && parsedBundleUrl.protocol !== "http:") {
       return null;
@@ -495,7 +611,7 @@ function parseRemoteConnectDeepLink(rawUrl: string): RemoteWorkspaceDefaults | n
   }
 
   const protocol = url.protocol.toLowerCase();
-  if (protocol !== "openwork:" && protocol !== "https:" && protocol !== "http:") {
+  if (protocol !== "openwork:" && protocol !== "openwork-dev:" && protocol !== "https:" && protocol !== "http:") {
     return null;
   }
 
@@ -525,6 +641,71 @@ function parseRemoteConnectDeepLink(rawUrl: string): RemoteWorkspaceDefaults | n
     directory: null,
     displayName: displayName || null,
   };
+}
+
+function normalizeDebugShareLinkInput(rawValue: string): string {
+  const trimmed = rawValue.trim();
+  if (!trimmed) return "";
+
+  const directMatch = trimmed.match(/(?:openwork-dev|openwork|https?):\/\/[^\s"'<>]+/i);
+  if (directMatch) return directMatch[0];
+
+  const bareShareMatch = trimmed.match(/share\.openwork\.software\/b\/[^\s"'<>]+/i);
+  if (bareShareMatch) return `https://${bareShareMatch[0]}`;
+
+  return trimmed;
+}
+
+function parseDebugShareLinkInput(rawValue: string):
+  | { kind: "bundle"; link: SharedBundleDeepLink }
+  | { kind: "remote"; link: RemoteWorkspaceDefaults }
+  | null {
+  const normalized = normalizeDebugShareLinkInput(rawValue);
+  if (!normalized) return null;
+
+  const sharedBundleLink = parseSharedBundleDeepLink(normalized);
+  if (sharedBundleLink) {
+    return { kind: "bundle", link: sharedBundleLink };
+  }
+
+  const remoteConnectLink = parseRemoteConnectDeepLink(normalized);
+  if (remoteConnectLink) {
+    return { kind: "remote", link: remoteConnectLink };
+  }
+
+  const bundleMatch = normalized.match(/ow_bundle=([^&\s]+)/i);
+  if (bundleMatch?.[1]) {
+    try {
+      const bundleUrl = decodeURIComponent(bundleMatch[1]);
+      const intentMatch = normalized.match(/(?:ow_intent|intent)=([^&\s]+)/i);
+      const labelMatch = normalized.match(/ow_label=([^&\s]+)/i);
+      const sourceMatch = normalized.match(/(?:ow_source|source)=([^&\s]+)/i);
+      return {
+        kind: "bundle",
+        link: {
+          bundleUrl,
+          intent: normalizeSharedBundleImportIntent(intentMatch?.[1] ? decodeURIComponent(intentMatch[1]) : undefined),
+          label: labelMatch?.[1] ? decodeURIComponent(labelMatch[1]) : undefined,
+          source: sourceMatch?.[1] ? decodeURIComponent(sourceMatch[1]) : undefined,
+        },
+      };
+    } catch {
+      // ignore fallback parsing errors
+    }
+  }
+
+  const shareIdMatch = normalized.match(/share\.openwork\.software\/b\/([^\s/?#"'<>]+)/i);
+  if (shareIdMatch?.[1]) {
+    return {
+      kind: "bundle",
+      link: {
+        bundleUrl: `https://share.openwork.software/b/${shareIdMatch[1]}`,
+        intent: "new_worker",
+      },
+    };
+  }
+
+  return null;
 }
 
 function stripRemoteConnectQuery(rawUrl: string): string | null {
@@ -637,11 +818,6 @@ export default function App() {
     if (next === "session") {
       if (sessionId) {
         goToSession(sessionId);
-        return;
-      }
-      const fallback = activeSessionId();
-      if (fallback) {
-        goToSession(fallback);
         return;
       }
       navigate("/session");
@@ -1094,6 +1270,11 @@ export default function App() {
   const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(
     null
   );
+  const [settingsReturnTarget, setSettingsReturnTarget] = createSignal<SettingsReturnTarget>({
+    view: "dashboard",
+    tab: "scheduled",
+    sessionId: null,
+  });
   const SESSION_BY_WORKSPACE_KEY = "openwork.workspace-last-session.v1";
   const readSessionByWorkspace = () => {
     if (typeof window === "undefined") return {} as Record<string, string>;
@@ -1121,6 +1302,7 @@ export default function App() {
   const [sessionModelById, setSessionModelById] = createSignal<
     Record<string, ModelRef>
   >({});
+  const [pendingSessionModel, setPendingSessionModel] = createSignal<ModelRef | null>(null);
   const [sessionModelOverridesReady, setSessionModelOverridesReady] = createSignal(false);
   const [workspaceDefaultModelReady, setWorkspaceDefaultModelReady] = createSignal(false);
   const [legacyDefaultModel, setLegacyDefaultModel] = createSignal<ModelRef>(DEFAULT_MODEL);
@@ -1130,6 +1312,53 @@ export default function App() {
   const [providerAuthBusy, setProviderAuthBusy] = createSignal(false);
   const [providerAuthError, setProviderAuthError] = createSignal<string | null>(null);
   const [providerAuthMethods, setProviderAuthMethods] = createSignal<Record<string, ProviderAuthMethod[]>>({});
+
+  createEffect(() => {
+    const view = currentView();
+    const currentTab = tab();
+    if (view === "dashboard" && currentTab === "settings") return;
+    setSettingsReturnTarget({
+      view,
+      tab: currentTab,
+      sessionId: selectedSessionId(),
+    });
+  });
+
+  const restoreSettingsReturnTarget = () => {
+    const target = settingsReturnTarget();
+    if (target.view === "session") {
+      if (target.sessionId) {
+        goToSession(target.sessionId);
+        return;
+      }
+      navigate("/session");
+      return;
+    }
+    if (target.view === "onboarding") {
+      navigate("/onboarding");
+      return;
+    }
+    if (target.view === "proto") {
+      navigate("/proto/workspaces");
+      return;
+    }
+    goToDashboard(target.tab);
+  };
+
+  const toggleSettingsView = (nextTab: SettingsTab = "general") => {
+    const settingsOpen = currentView() === "dashboard" && tab() === "settings";
+    if (settingsOpen) {
+      restoreSettingsReturnTarget();
+      return;
+    }
+    setSettingsTab(nextTab);
+    goToDashboard("settings");
+  };
+
+  let markReloadRequiredHandler: ((reason: ReloadReason, trigger?: ReloadTrigger) => void) | undefined;
+  const markReloadRequired = (reason: ReloadReason, trigger?: ReloadTrigger) => {
+    markReloadRequiredHandler?.(reason, trigger);
+  };
 
   const sessionStore = createSessionStore({
     client,
@@ -1153,6 +1382,7 @@ export default function App() {
     developerMode,
     setError,
     setSseConnected,
+    markReloadRequired,
     onHotReloadApplied: () => {
       void refreshSkills({ force: true });
       void refreshPlugins(pluginScope());
@@ -1162,10 +1392,12 @@ export default function App() {
 
   const {
     sessions,
+    sessionById,
     sessionStatusById,
     selectedSession,
     selectedSessionStatus,
     messages,
+    messagesBySessionId,
     todos,
     pendingPermissions,
     permissionReplyBusy,
@@ -1175,9 +1407,11 @@ export default function App() {
     events,
     activePermission,
     loadSessions,
+    ensureSessionLoaded,
     refreshPendingPermissions,
     refreshPendingQuestions,
     selectSession,
+    loadEarlierMessages,
     renameSession,
     respondPermission,
     respondQuestion,
@@ -1186,6 +1420,9 @@ export default function App() {
     setMessages,
     setTodos,
     setPendingPermissions,
+    selectedSessionHasEarlierMessages,
+    selectedSessionLoadingEarlierMessages,
+    sessionLoadingById,
   } = sessionStore;
 
   const ARTIFACT_SCAN_MESSAGE_WINDOW = 220;
@@ -1229,7 +1466,14 @@ export default function App() {
 
   type PartInput = TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput;
 
-  const buildPromptParts = (draft: ComposerDraft): PartInput[] => {
+  const attachmentToFilePart = async (attachment: ComposerAttachment): Promise<FilePartInput> => ({
+    type: "file",
+    url: await fileToDataUrl(attachment.file),
+    filename: attachment.name,
+    mime: attachment.mimeType,
+  });
+
+  const buildPromptParts = async (draft: ComposerDraft): Promise<PartInput[]> => {
     const parts: PartInput[] = [];
     const text = draft.resolvedText ?? draft.text;
     parts.push({ type: "text", text } as TextPartInput);
@@ -1269,19 +1513,12 @@ export default function App() {
       }
     }
 
-    for (const attachment of draft.attachments) {
-      parts.push({
-        type: "file",
-        url: attachment.dataUrl,
-        filename: attachment.name,
-        mime: attachment.mimeType,
-      } as FilePartInput);
-    }
+    parts.push(...(await Promise.all(draft.attachments.map(attachmentToFilePart))));
 
     return parts;
   };
 
-  const buildCommandFileParts = (draft: ComposerDraft): FilePartInput[] => {
+  const buildCommandFileParts = async (draft: ComposerDraft): Promise<FilePartInput[]> => {
     const parts: FilePartInput[] = [];
     const root = workspaceProjectDir().trim();
 
@@ -1312,14 +1549,7 @@ export default function App() {
       } as FilePartInput);
     }
 
-    for (const attachment of draft.attachments) {
-      parts.push({
-        type: "file",
-        url: attachment.dataUrl,
-        filename: attachment.name,
-        mime: attachment.mimeType,
-      } as FilePartInput);
-    }
+    parts.push(...(await Promise.all(draft.attachments.map(attachmentToFilePart))));
 
     return parts;
   };
@@ -1463,7 +1693,7 @@ export default function App() {
 
       const model = selectedSessionModel();
       const agent = selectedSessionAgent();
-      const parts = buildPromptParts(resolvedDraft);
+      const parts = await buildPromptParts(resolvedDraft);
       const selectedVariant = modelVariant() ?? undefined;
       const reasoningEffort = resolveCodexReasoningEffort(model.modelID, selectedVariant ?? null);
       const requestVariant = reasoningEffort ? undefined : selectedVariant;
@@ -1491,7 +1721,7 @@ export default function App() {
 
         // Slash command: route through session.command() API
         const modelString = `${model.providerID}/${model.modelID}`;
-        const files = buildCommandFileParts(resolvedDraft);
+        const files = await buildCommandFileParts(resolvedDraft);
 
         // session.command() expects `model` as a provider/model string and only supports file parts.
         unwrap(
@@ -1544,7 +1774,7 @@ export default function App() {
         error: e instanceof Error ? e.message : safeStringify(e),
       });
       const message = e instanceof Error ? e.message : safeStringify(e);
-      setError(addOpencodeCacheHint(message));
+      sessionStore.appendSessionErrorTurn(sessionID, addOpencodeCacheHint(message));
     } finally {
       setBusy(false);
       setBusyLabel(null);
@@ -1655,6 +1885,65 @@ export default function App() {
     return "";
   };
 
+  const createSyntheticSessionErrorMessage = (
+    sessionID: string,
+    errorTurn: SessionErrorTurn,
+  ): MessageWithParts => {
+    const info: PlaceholderAssistantMessage = {
+      id: errorTurn.id,
+      sessionID,
+      role: "assistant",
+      time: { created: errorTurn.time, completed: errorTurn.time },
+      parentID: errorTurn.afterMessageID ?? "",
+      modelID: "",
+      providerID: "",
+      mode: "",
+      agent: "",
+      path: { cwd: "", root: "" },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    };
+
+    return {
+      info,
+      parts: [
+        {
+          id: `${errorTurn.id}:text`,
+          sessionID,
+          messageID: errorTurn.id,
+          type: "text",
+          text: errorTurn.text,
+        } as Part,
+      ],
+    };
+  };
+
+  const insertSyntheticSessionErrors = (
+    list: MessageWithParts[],
+    sessionID: string | null,
+    errorTurns: SessionErrorTurn[],
+  ) => {
+    if (!sessionID || errorTurns.length === 0) return list;
+
+    const next = list.slice();
+    errorTurns.forEach((errorTurn) => {
+      if (next.some((message) => messageIdFromInfo(message) === errorTurn.id)) return;
+      const syntheticMessage = createSyntheticSessionErrorMessage(sessionID, errorTurn);
+      const anchorIndex = errorTurn.afterMessageID
+        ? next.findIndex((message) => messageIdFromInfo(message) === errorTurn.afterMessageID)
+        : -1;
+
+      if (anchorIndex === -1) {
+        next.push(syntheticMessage);
+        return;
+      }
+
+      next.splice(anchorIndex + 1, 0, syntheticMessage);
+    });
+
+    return next;
+  };
+
   const upsertLocalSession = (next: Session | null | undefined) => {
     const id = (next as { id?: string } | null)?.id ?? "";
     if (!id) return;
@@ -1674,13 +1963,18 @@ export default function App() {
   // as the visibility boundary. OpenWork mirrors that behavior by filtering the
   // displayed transcript.
   const visibleMessages = createMemo(() => {
-    const list = messages();
+    const sessionID = selectedSessionId();
+    const errorTurns = sessionStore.selectedSessionErrorTurns();
+    const list = messages().filter((message) => {
+      const id = messageIdFromInfo(message);
+      return !id.startsWith(SYNTHETIC_SESSION_ERROR_MESSAGE_PREFIX);
+    });
     const revert = selectedSession()?.revert?.messageID ?? null;
-    if (!revert) return list;
-    return list.filter((message) => {
+    const visible = !revert ? list : list.filter((message) => {
       const id = messageIdFromInfo(message);
       return Boolean(id) && id < revert;
     });
+    return insertSyntheticSessionErrors(visible, sessionID, errorTurns);
   });
 
   const restorePromptFromUserMessage = (message: MessageWithParts) => {
@@ -1948,6 +2242,47 @@ export default function App() {
     }
   }
 
+  async function refreshProviders(options?: { dispose?: boolean }) {
+    const c = client();
+    if (!c) return null;
+
+    if (options?.dispose) {
+      try {
+        unwrap(await c.instance.dispose());
+      } catch {
+        // ignore dispose failures and try reading current state anyway
+      }
+
+      try {
+        await waitForHealthy(client() ?? c, { timeoutMs: 8_000, pollMs: 250 });
+      } catch {
+        // ignore health wait failures and still attempt provider reads
+      }
+    }
+
+    const activeClient = client() ?? c;
+    try {
+      const updated = unwrap(await activeClient.provider.list());
+      globalSync.set("provider", updated);
+      return updated;
+    } catch {
+      try {
+        const fallback = unwrap(await activeClient.config.providers());
+        const mapped = mapConfigProvidersToList(fallback.providers);
+        const previousConnected = providerConnectedIds();
+        const next = {
+          all: mapped,
+          connected: previousConnected.filter((id) => mapped.some((provider) => provider.id === id)),
+          default: fallback.default,
+        };
+        globalSync.set("provider", next);
+        return next;
+      } catch {
+        return null;
+      }
+    }
+  }
+
   async function completeProviderAuthOAuth(providerId: string, methodIndex: number, code?: string) {
     setProviderAuthError(null);
     const c = client();
@@ -1964,6 +2299,27 @@ export default function App() {
       throw new Error("OAuth method is required");
     }
 
+    const waitForProviderConnection = async (timeoutMs = 15_000, pollMs = 2_000) => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        try {
+          const updated = await refreshProviders({ dispose: true });
+          if (Array.isArray(updated?.connected) && updated.connected.includes(resolved)) {
+            return true;
+          }
+        } catch {
+          // ignore and retry
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      }
+      return false;
+    };
+
+    const isPendingOauthError = (error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error ?? "");
+      return /request timed out/i.test(text) || /ProviderAuthOauthMissing/i.test(text);
+    };
+
     try {
       const trimmedCode = code?.trim();
       const result = await c.provider.oauth.callback({
@@ -1972,10 +2328,28 @@ export default function App() {
         code: trimmedCode || undefined,
       });
       assertNoClientError(result);
-      const updated = unwrap(await c.provider.list());
-      globalSync.set("provider", updated);
-      return `Connected ${resolved}`;
+      const updated = await refreshProviders({ dispose: true });
+      const connectedNow = Array.isArray(updated?.connected) && updated.connected.includes(resolved);
+      if (connectedNow) {
+        return { connected: true, message: `Connected ${resolved}` };
+      }
+      const connected = await waitForProviderConnection();
+      if (connected) {
+        return { connected: true, message: `Connected ${resolved}` };
+      }
+      return { connected: false, pending: true };
     } catch (error) {
+      if (isPendingOauthError(error)) {
+        const updated = await refreshProviders({ dispose: true });
+        if (Array.isArray(updated?.connected) && updated.connected.includes(resolved)) {
+          return { connected: true, message: `Connected ${resolved}` };
+        }
+        const connected = await waitForProviderConnection();
+        if (connected) {
+          return { connected: true, message: `Connected ${resolved}` };
+        }
+        return { connected: false, pending: true };
+      }
       const message = describeProviderError(error, "Failed to complete OAuth");
       setProviderAuthError(message);
       throw error instanceof Error ? error : new Error(message);
@@ -1999,11 +2373,49 @@ export default function App() {
         providerID: providerId,
         auth: { type: "api", key: trimmed },
       });
-      const updated = unwrap(await c.provider.list());
-      globalSync.set("provider", updated);
+      await refreshProviders({ dispose: true });
       return `Connected ${providerId}`;
     } catch (error) {
       const message = describeProviderError(error, "Failed to save API key");
+      setProviderAuthError(message);
+      throw error instanceof Error ? error : new Error(message);
+    }
+  }
+
+  async function disconnectProvider(providerId: string) {
+    setProviderAuthError(null);
+    const c = client();
+    if (!c) {
+      throw new Error("Not connected to a server");
+    }
+
+    const resolved = providerId.trim();
+    if (!resolved) {
+      throw new Error("Provider ID is required");
+    }
+
+    const removeProviderAuth = async () => {
+      const rawClient = (c as unknown as { client?: { delete?: (options: { url: string }) => Promise<unknown> } })
+        .client;
+      if (rawClient?.delete) {
+        await rawClient.delete({ url: `/auth/${encodeURIComponent(resolved)}` });
+        return;
+      }
+      await c.auth.set({ providerID: resolved, auth: null as never });
+    };
+
+    try {
+      await removeProviderAuth();
+      try {
+        await c.global.dispose();
+      } catch {
+        // ignore
+      }
+      const updated = unwrap(await c.provider.list());
+      globalSync.set("provider", updated);
+      return `Disconnected ${resolved}`;
+    } catch (error) {
+      const message = describeProviderError(error, "Failed to disconnect provider");
       setProviderAuthError(message);
       throw error instanceof Error ? error : new Error(message);
     }
@@ -2104,17 +2516,11 @@ export default function App() {
   const [scheduledJobsStatus, setScheduledJobsStatus] = createSignal<string | null>(null);
   const [scheduledJobsBusy, setScheduledJobsBusy] = createSignal(false);
   const [scheduledJobsUpdatedAt, setScheduledJobsUpdatedAt] = createSignal<number | null>(null);
-  const [soulStatusByWorkspaceId, setSoulStatusByWorkspaceId] = createSignal<
-    Record<string, OpenworkSoulStatus | null>
-  >({});
-  const [activeSoulHeartbeats, setActiveSoulHeartbeats] = createSignal<OpenworkSoulHeartbeatEntry[]>([]);
-  const [soulStatusBusy, setSoulStatusBusy] = createSignal(false);
-  const [soulHeartbeatsBusy, setSoulHeartbeatsBusy] = createSignal(false);
-  const [soulError, setSoulError] = createSignal<string | null>(null);
 
   // MCP OAuth modal state
   const [mcpAuthModalOpen, setMcpAuthModalOpen] = createSignal(false);
   const [mcpAuthEntry, setMcpAuthEntry] = createSignal<(typeof MCP_QUICK_CONNECT)[number] | null>(null);
+  const [mcpAuthNeedsReload, setMcpAuthNeedsReload] = createSignal(false);
 
   const extensionsStore = createExtensionsStore({
     client,
@@ -2129,6 +2535,7 @@ export default function App() {
     setBusyLabel,
     setBusyStartedAt,
     setError,
+    markReloadRequired,
     onNotionSkillInstalled: () => {
       setNotionSkillInstalled(true);
       try {
@@ -2147,6 +2554,8 @@ export default function App() {
     skillsStatus,
     hubSkills,
     hubSkillsStatus,
+    hubRepo,
+    hubRepos,
     pluginScope,
     setPluginScope,
     pluginConfig,
@@ -2162,6 +2571,9 @@ export default function App() {
     isPluginInstalledByName,
     refreshSkills,
     refreshHubSkills,
+    setHubRepo,
+    addHubRepo,
+    removeHubRepo,
     refreshPlugins,
     addPlugin,
     removePlugin,
@@ -2529,7 +2941,7 @@ export default function App() {
       // Fetch sessions scoped to the workspace directory to avoid loading the
       // full global session list for every workspace.
       const list = unwrap(
-        await c.session.list({ directory: queryDirectory, roots: true, limit: SIDEBAR_SESSION_LIMIT }),
+        await c.session.list({ directory: queryDirectory, roots: false, limit: SIDEBAR_SESSION_LIMIT }),
       );
       wsDebug("sidebar:list", {
         id,
@@ -2550,6 +2962,7 @@ export default function App() {
         id: session.id,
         title: session.title,
         slug: session.slug,
+        parentID: session.parentID,
         time: session.time,
         directory: session.directory,
       }));
@@ -2678,16 +3091,53 @@ export default function App() {
         ? allSessions.filter((session) => normalizeDirectoryPath(session.directory) === activeWorkspaceRoot)
         : allSessions;
       const sorted = sortSessionsByActivity(scopedSessions);
-      setSidebarSessionsByWorkspaceId((prev) => ({
-        ...prev,
-        [wsId]: sorted.map((s) => ({
-          id: s.id,
-          title: s.title,
-          slug: s.slug,
-          time: s.time,
-          directory: s.directory,
-        })),
+      const rootItems: SidebarSessionItem[] = sorted.map((s) => ({
+        id: s.id,
+        title: s.title,
+        slug: s.slug,
+        parentID: s.parentID,
+        time: s.time,
+        directory: s.directory,
       }));
+      setSidebarSessionsByWorkspaceId((prev) => {
+        const current = prev[wsId] ?? [];
+        const hasCurrentChildren = current.some((item) => Boolean(item.parentID?.trim()));
+        const incomingAreRootsOnly = rootItems.every((item) => !item.parentID?.trim());
+        if (!hasCurrentChildren || !incomingAreRootsOnly) {
+          return {
+            ...prev,
+            [wsId]: rootItems,
+          };
+        }
+
+        const byId = new Map(current.map((item) => [item.id, item] as const));
+        for (const item of rootItems) {
+          byId.set(item.id, {
+            ...(byId.get(item.id) ?? {}),
+            ...item,
+          });
+        }
+
+        const rootIDs = new Set(rootItems.map((item) => item.id));
+        const keepChild = (item: SidebarSessionItem, seen = new Set<string>()) => {
+          const parentID = item.parentID?.trim() ?? "";
+          if (!parentID) return false;
+          if (rootIDs.has(parentID)) return true;
+          if (seen.has(parentID)) return false;
+          const parent = byId.get(parentID);
+          if (!parent) return false;
+          seen.add(parentID);
+          return keepChild(parent, seen);
+        };
+
+        return {
+          ...prev,
+          [wsId]: [
+            ...rootItems,
+            ...current.filter((item) => !rootIDs.has(item.id) && keepChild(item)),
+          ],
+        };
+      });
     }
   });
 
@@ -2769,16 +3219,9 @@ export default function App() {
     if (creatingSession()) return;
     if (selectedSessionId()) return;
 
-    const list = sessions();
-    if (!list.length) return;
-
-    const workspaceId = workspaceStore.activeWorkspaceId();
-    const map = workspaceId ? readSessionByWorkspace() : null;
-    const saved = workspaceId ? map?.[workspaceId] : null;
-    const match = saved ? list.find((session) => session.id === saved) : null;
-    const next = match ?? list[0];
-    void selectSession(next.id);
-    setView("session", next.id);
+    // Keep /session as a draft-ready empty state until the user picks a session
+    // or sends a prompt. Avoid auto-selecting prior sessions on app launch.
+    return;
   });
 
   createEffect(() => {
@@ -2895,19 +3338,148 @@ export default function App() {
     };
   };
 
-  const waitForSharedBundleImportTarget = async (timeoutMs = 20_000) => {
+  const isSharedBundleImportWorkspace = (workspace: WorkspaceDisplay | WorkspaceInfo | null) => {
+    if (!workspace?.id?.trim()) return false;
+    if (workspace.workspaceType === "local") {
+      return Boolean(workspace.path?.trim());
+    }
+    return Boolean(
+      workspace.remoteType === "openwork" ||
+        workspace.openworkHostUrl?.trim() ||
+        workspace.openworkWorkspaceId?.trim()
+    );
+  };
+
+  const resolveSharedBundleImportTargetForWorkspace = (
+    workspace: WorkspaceDisplay | WorkspaceInfo | null,
+  ): SharedBundleImportTarget | undefined => {
+    if (!workspace) return undefined;
+    if (workspace.workspaceType === "local") {
+      const localRoot = workspace.path?.trim() ?? "";
+      return localRoot ? { localRoot } : undefined;
+    }
+
+    const workspaceId =
+      workspace.openworkWorkspaceId?.trim() ||
+      parseOpenworkWorkspaceIdFromUrl(workspace.openworkHostUrl ?? "") ||
+      parseOpenworkWorkspaceIdFromUrl(workspace.baseUrl ?? "") ||
+      null;
+    const directoryHint = workspace.directory?.trim() || workspace.path?.trim() || null;
+    if (workspaceId || directoryHint) {
+      return {
+        workspaceId,
+        directoryHint,
+      };
+    }
+    return undefined;
+  };
+
+  const findSharedBundleImportWorkspaceId = (
+    items: Array<{ id: string; path?: string; directory?: string; opencode?: { directory?: string } }>,
+    target?: SharedBundleImportTarget,
+  ) => {
+    const explicitId = target?.workspaceId?.trim() ?? "";
+    if (explicitId) {
+      const match = items.find((entry) => entry.id === explicitId);
+      if (match?.id) return match.id;
+    }
+
+    const localRoot = normalizeDirectoryPath(target?.localRoot?.trim() ?? "");
+    if (localRoot) {
+      const match = items.find((entry) => normalizeDirectoryPath(entry.path ?? "") === localRoot);
+      if (match?.id) return match.id;
+    }
+
+    const directoryHint = normalizeDirectoryPath(target?.directoryHint?.trim() ?? "");
+    if (directoryHint) {
+      const match = items.find((entry) => {
+        const entryPath = normalizeDirectoryPath((entry.opencode?.directory ?? entry.directory ?? entry.path ?? "").trim());
+        return Boolean(entryPath && entryPath === directoryHint);
+      });
+      if (match?.id) return match.id;
+    }
+
+    return null;
+  };
+
+  const resolveActiveSharedBundleImportTarget = (): SharedBundleImportTarget => {
+    const active = workspaceStore.activeWorkspaceDisplay();
+    if (active.workspaceType === "local") {
+      return { localRoot: workspaceStore.activeWorkspaceRoot().trim() };
+    }
+
+    return {
+      workspaceId:
+        active.openworkWorkspaceId?.trim() ||
+        parseOpenworkWorkspaceIdFromUrl(active.openworkHostUrl ?? "") ||
+        parseOpenworkWorkspaceIdFromUrl(active.baseUrl ?? "") ||
+        null,
+      directoryHint: active.directory?.trim() || active.path?.trim() || null,
+    };
+  };
+
+  const waitForSharedBundleImportTarget = async (timeoutMs = 20_000, target?: SharedBundleImportTarget) => {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
       const client = openworkServerClient();
-      const workspaceId = openworkServerWorkspaceId();
-      if (client && workspaceId && openworkServerStatus() === "connected") {
-        return { client, workspaceId };
+      if (client && openworkServerStatus() === "connected") {
+        if (target?.workspaceId?.trim() || target?.localRoot?.trim() || target?.directoryHint?.trim()) {
+          try {
+            const response = await client.listWorkspaces();
+            const items = Array.isArray(response.items) ? response.items : [];
+            const matchId = findSharedBundleImportWorkspaceId(items, target);
+            if (matchId) {
+              setOpenworkServerWorkspaceId(matchId);
+              return { client, workspaceId: matchId };
+            }
+          } catch {
+            // ignore and keep polling
+          }
+        } else {
+          const workspaceId = openworkServerWorkspaceId();
+          if (workspaceId) {
+            return { client, workspaceId };
+          }
+        }
       }
       await new Promise<void>((resolve) => {
         window.setTimeout(resolve, 200);
       });
     }
     throw new Error("OpenWork worker is not ready yet.");
+  };
+
+  const importSharedBundlePayload = async (bundle: SharedBundleV1, target?: SharedBundleImportTarget) => {
+    const { client, workspaceId } = await waitForSharedBundleImportTarget(20_000, target);
+    const { payload, importedSkillsCount } = buildImportPayloadFromBundle(bundle);
+    await client.importWorkspace(workspaceId, payload);
+    await refreshSkills({ force: true });
+    await refreshHubSkills({ force: true });
+    if (importedSkillsCount > 0) {
+      markReloadRequired("skills", {
+        type: "skill",
+        name: bundle.name?.trim() || undefined,
+        action: "added",
+      });
+      console.log(`[openwork] imported ${importedSkillsCount} skills from share bundle`);
+    }
+  };
+
+  const importSharedBundleIntoActiveWorker = async (
+    request: SharedBundleDeepLink,
+    target?: SharedBundleImportTarget,
+    bundleOverride?: SharedBundleV1,
+  ) => {
+    try {
+      const bundle = bundleOverride ?? (await fetchSharedBundle(request.bundleUrl));
+      await importSharedBundlePayload(bundle, target);
+      setError(null);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : safeStringify(error);
+      setError(addOpencodeCacheHint(message));
+      return false;
+    }
   };
 
   const createWorkerForSharedBundle = async (request: SharedBundleDeepLink, bundle: SharedBundleV1) => {
@@ -2933,6 +3505,109 @@ export default function App() {
     }
   };
 
+  const importSharedSkillIntoWorkspace = async (workspaceId: string) => {
+    if (sharedSkillDestinationBusyId()) return;
+    const destination = sharedSkillDestinationRequest();
+    if (!destination) return;
+
+    const workspace = workspaceStore.workspaces().find((item) => item.id === workspaceId) ?? null;
+    if (!isSharedBundleImportWorkspace(workspace)) {
+      setError("This worker cannot accept shared skills yet.");
+      return;
+    }
+
+    setView("dashboard");
+    setTab("scheduled");
+    setError(null);
+    setSharedSkillDestinationBusyId(workspaceId);
+
+    try {
+      const ok = await workspaceStore.activateWorkspace(workspaceId);
+      if (!ok) return;
+
+      const imported = await importSharedBundleIntoActiveWorker(
+        destination.request,
+        resolveSharedBundleImportTargetForWorkspace(workspace),
+        destination.bundle,
+      );
+      if (!imported) return;
+
+      showSharedSkillSuccessToast({
+        title: "Skill added",
+        description: `Added '${destination.bundle.name.trim() || "Shared skill"}' to ${describeWorkspaceForToasts(workspace)}.`,
+      });
+      setSharedSkillDestinationRequest(null);
+      setSharedBundleCreateWorkerRequest(null);
+      setSharedBundleNoticeShown(false);
+    } finally {
+      setSharedSkillDestinationBusyId(null);
+    }
+  };
+
+  const processSharedBundleInvite = async (request: SharedBundleDeepLink) => {
+    const bundle = await fetchSharedBundle(request.bundleUrl);
+
+    if (bundle.type === "skill") {
+      setView("dashboard");
+      setTab("scheduled");
+      setError(null);
+      setSharedSkillDestinationRequest({ request, bundle });
+      return { mode: "choice" as const, bundle };
+    }
+
+    if (bundle.type === "skills-set") {
+      setView("dashboard");
+      setTab("skills");
+      setError(null);
+      setSharedBundleImportChoice({ request, bundle });
+      return { mode: "choice" as const, bundle };
+    }
+
+    if (request.intent === "new_worker" && isTauriRuntime()) {
+      setView("dashboard");
+      setTab("scheduled");
+      setError(null);
+      setSharedBundleCreateWorkerRequest({
+        request,
+        bundle,
+        defaultPreset: "automation",
+      });
+      workspaceStore.setCreateWorkspaceOpen(true);
+      return { mode: "new_worker_modal" as const, bundle };
+    }
+
+    if (request.intent === "import_current") {
+      const client = openworkServerClient();
+      const connected = openworkServerStatus() === "connected";
+      const target = resolveActiveSharedBundleImportTarget();
+      const hasTargetHint = Boolean(target.workspaceId?.trim() || target.localRoot?.trim() || target.directoryHint?.trim());
+      if (!client || !connected || !hasTargetHint) {
+        if (!sharedBundleNoticeShown()) {
+          setSharedBundleNoticeShown(true);
+          setError("Share link detected. Connect to a writable OpenWork worker to import this bundle.");
+        }
+        return { mode: "blocked_import_current" as const, bundle };
+      }
+    } else {
+      const target = resolveSharedBundleWorkerTarget();
+      if (!target.hostUrl.trim() || !target.token.trim()) {
+        if (!sharedBundleNoticeShown()) {
+          setSharedBundleNoticeShown(true);
+          setError("Share link detected. Configure an OpenWork host and token to create a new worker.");
+        }
+        return { mode: "blocked_new_worker" as const, bundle };
+      }
+    }
+
+    if (request.intent === "new_worker") {
+      await createWorkerForSharedBundle(request, bundle);
+    }
+
+    await importSharedBundlePayload(bundle, resolveActiveSharedBundleImportTarget());
+    setError(null);
+    return { mode: "imported" as const, bundle };
+  };
+
   createEffect(() => {
     const request = pendingSharedBundleInvite();
     if (!request || booting()) {
@@ -2943,52 +3618,13 @@ export default function App() {
       return;
     }
 
-    if (request.intent === "import_current") {
-      const client = openworkServerClient();
-      const workspaceId = openworkServerWorkspaceId();
-      const connected = openworkServerStatus() === "connected";
-      if (!client || !workspaceId || !connected) {
-        if (!sharedBundleNoticeShown()) {
-          setSharedBundleNoticeShown(true);
-          setError("Share link detected. Connect to a writable OpenWork worker to import this bundle.");
-        }
-        return;
-      }
-    } else {
-      const target = resolveSharedBundleWorkerTarget();
-      if (!target.hostUrl.trim() || !target.token.trim()) {
-        if (!sharedBundleNoticeShown()) {
-          setSharedBundleNoticeShown(true);
-          setError("Share link detected. Configure an OpenWork host and token to create a new worker.");
-        }
-        return;
-      }
-    }
-
     let cancelled = false;
     setSharedBundleImportBusy(true);
 
     void (async () => {
       try {
-        const bundle = await fetchSharedBundle(request.bundleUrl);
+        await processSharedBundleInvite(request);
         if (cancelled) return;
-
-        if (request.intent === "new_worker") {
-          await createWorkerForSharedBundle(request, bundle);
-          if (cancelled) return;
-        }
-
-        const { client, workspaceId } = await waitForSharedBundleImportTarget();
-        if (cancelled) return;
-
-        const { payload, importedSkillsCount } = buildImportPayloadFromBundle(bundle);
-        await client.importWorkspace(workspaceId, payload);
-        await refreshSkills({ force: true });
-        await refreshHubSkills({ force: true });
-        setError(null);
-        if (importedSkillsCount > 0) {
-          console.log(`[openwork] imported ${importedSkillsCount} skills from share bundle`);
-        }
       } catch (error) {
         if (!cancelled) {
           const message = error instanceof Error ? error.message : safeStringify(error);
@@ -3147,12 +3783,88 @@ export default function App() {
   const [deepLinkRemoteWorkspaceDefaults, setDeepLinkRemoteWorkspaceDefaults] = createSignal<RemoteWorkspaceDefaults | null>(null);
   const [pendingRemoteConnectDeepLink, setPendingRemoteConnectDeepLink] = createSignal<RemoteWorkspaceDefaults | null>(null);
   const [pendingSharedBundleInvite, setPendingSharedBundleInvite] = createSignal<SharedBundleDeepLink | null>(null);
+  const [sharedBundleCreateWorkerRequest, setSharedBundleCreateWorkerRequest] =
+    createSignal<SharedBundleCreateWorkerRequest | null>(null);
+  const [sharedSkillDestinationRequest, setSharedSkillDestinationRequest] =
+    createSignal<SharedSkillDestinationRequest | null>(null);
+  const [sharedSkillDestinationBusyId, setSharedSkillDestinationBusyId] = createSignal<string | null>(null);
+  const [sharedBundleImportChoice, setSharedBundleImportChoice] = createSignal<SharedBundleImportChoice | null>(null);
   const [sharedBundleImportBusy, setSharedBundleImportBusy] = createSignal(false);
+  const [sharedBundleImportError, setSharedBundleImportError] = createSignal<string | null>(null);
   const [sharedBundleNoticeShown, setSharedBundleNoticeShown] = createSignal(false);
+  const [sharedSkillSuccessToast, setSharedSkillSuccessToast] = createSignal<SharedSkillSuccessToast | null>(null);
   const [renameWorkspaceOpen, setRenameWorkspaceOpen] = createSignal(false);
   const [renameWorkspaceId, setRenameWorkspaceId] = createSignal<string | null>(null);
   const [renameWorkspaceName, setRenameWorkspaceName] = createSignal("");
   const [renameWorkspaceBusy, setRenameWorkspaceBusy] = createSignal(false);
+  let sharedSkillSuccessToastTimer: number | null = null;
+
+  const clearSharedSkillSuccessToast = () => {
+    if (sharedSkillSuccessToastTimer) {
+      window.clearTimeout(sharedSkillSuccessToastTimer);
+      sharedSkillSuccessToastTimer = null;
+    }
+    setSharedSkillSuccessToast(null);
+  };
+
+  const showSharedSkillSuccessToast = (toast: SharedSkillSuccessToast) => {
+    if (sharedSkillSuccessToastTimer) {
+      window.clearTimeout(sharedSkillSuccessToastTimer);
+    }
+    setSharedSkillSuccessToast(toast);
+    sharedSkillSuccessToastTimer = window.setTimeout(() => {
+      sharedSkillSuccessToastTimer = null;
+      setSharedSkillSuccessToast(null);
+    }, 4200);
+  };
+
+  onCleanup(() => {
+    if (sharedSkillSuccessToastTimer) {
+      window.clearTimeout(sharedSkillSuccessToastTimer);
+    }
+  });
+
+  const createWorkspaceDefaultPreset = createMemo<WorkspacePreset>(() =>
+    sharedBundleCreateWorkerRequest()?.defaultPreset ?? "starter"
+  );
+
+  const sharedSkillDestinationWorkspaces = createMemo(() => {
+    const activeId = workspaceStore.activeWorkspaceId();
+    return workspaceStore
+      .workspaces()
+      .filter((workspace) => isSharedBundleImportWorkspace(workspace))
+      .slice()
+      .sort((a, b) => {
+        if (a.id === activeId && b.id !== activeId) return -1;
+        if (b.id === activeId && a.id !== activeId) return 1;
+        const aLabel =
+          a.displayName?.trim() ||
+          a.openworkWorkspaceName?.trim() ||
+          a.name?.trim() ||
+          a.directory?.trim() ||
+          a.path?.trim() ||
+          a.baseUrl?.trim() ||
+          "";
+        const bLabel =
+          b.displayName?.trim() ||
+          b.openworkWorkspaceName?.trim() ||
+          b.name?.trim() ||
+          b.directory?.trim() ||
+          b.path?.trim() ||
+          b.baseUrl?.trim() ||
+          "";
+        return aLabel.localeCompare(bLabel, undefined, { sensitivity: "base" });
+      });
+  });
+
+  const describeWorkspaceForToasts = (workspace: WorkspaceDisplay | WorkspaceInfo | null) =>
+    workspace?.displayName?.trim() ||
+    workspace?.openworkWorkspaceName?.trim() ||
+    workspace?.name?.trim() ||
+    workspace?.directory?.trim() ||
+    workspace?.path?.trim() ||
+    workspace?.baseUrl?.trim() ||
+    "the selected worker";
 
   const queueRemoteConnectDeepLink = (rawUrl: string): boolean => {
     const parsed = parseRemoteConnectDeepLink(rawUrl);
@@ -3169,8 +3881,192 @@ export default function App() {
       return false;
     }
     setPendingSharedBundleInvite(parsed);
+    setSharedSkillDestinationRequest(null);
+    setSharedSkillDestinationBusyId(null);
+    setSharedBundleImportChoice(null);
+    setSharedBundleCreateWorkerRequest(null);
+    setSharedBundleImportError(null);
     setSharedBundleNoticeShown(false);
     return true;
+  };
+
+  const openDebugShareLink = async (rawUrl: string): Promise<{ ok: boolean; message: string }> => {
+    const parsed = parseDebugShareLinkInput(rawUrl);
+    if (!parsed) {
+      return { ok: false, message: "That link is not a recognized OpenWork deep link or share URL." };
+    }
+
+    setError(null);
+    setView("dashboard");
+    if (parsed.kind === "bundle") {
+      setPendingSharedBundleInvite(null);
+      setSharedBundleNoticeShown(false);
+      setSharedSkillDestinationRequest(null);
+      setSharedSkillDestinationBusyId(null);
+      setSharedBundleImportError(null);
+      setSharedBundleImportChoice(null);
+      setSharedBundleCreateWorkerRequest(null);
+
+      try {
+        setSharedBundleImportBusy(true);
+        const result = await processSharedBundleInvite(parsed.link);
+        switch (result.mode) {
+          case "choice":
+            return { ok: true, message: "Opened the share import chooser." };
+          case "new_worker_modal":
+            return { ok: true, message: "Opened the new worker import flow." };
+          case "blocked_import_current":
+          case "blocked_new_worker":
+            return { ok: false, message: error() || "The share link needs more worker setup before it can open." };
+          case "imported":
+            return { ok: true, message: "Imported the shared bundle into the current worker." };
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : safeStringify(error);
+        const friendly = addOpencodeCacheHint(message);
+        setError(friendly);
+        return { ok: false, message: friendly };
+      } finally {
+        setSharedBundleImportBusy(false);
+      }
+    }
+    setPendingRemoteConnectDeepLink(parsed.kind === "remote" ? parsed.link : null);
+    setTab("scheduled");
+    return { ok: true, message: "Queued remote worker link. OpenWork should move into the connect flow." };
+  };
+
+  const closeSharedBundleImportChoice = () => {
+    if (sharedBundleImportBusy()) return;
+    setSharedBundleImportChoice(null);
+    setSharedBundleImportError(null);
+  };
+
+  const sharedBundleImportCopy = createMemo(() => {
+    const choice = sharedBundleImportChoice();
+    if (!choice) return null;
+    return describeSharedBundleImport(choice.bundle);
+  });
+
+  const sharedBundleWorkerOptions = createMemo(() => {
+    const activeWorkspaceId = workspaceStore.activeWorkspaceId().trim();
+    const items = workspaceStore.workspaces().map((workspace) => {
+      let disabledReason: string | null = null;
+      if (!resolveSharedBundleImportTargetForWorkspace(workspace)) {
+        disabledReason =
+          workspace.workspaceType === "remote" && workspace.remoteType !== "openwork"
+            ? "Only OpenWork-connected workers support direct shared skill imports."
+            : "This worker is missing the info OpenWork needs to import the bundle.";
+      }
+
+      const label =
+        workspace.displayName?.trim() ||
+        workspace.openworkWorkspaceName?.trim() ||
+        workspace.name?.trim() ||
+        workspace.path?.trim() ||
+        "Worker";
+      const badge =
+        workspace.workspaceType === "remote"
+          ? workspace.sandboxBackend === "docker" ||
+            Boolean(workspace.sandboxRunId?.trim()) ||
+            Boolean(workspace.sandboxContainerName?.trim())
+            ? "Sandbox"
+            : "Remote"
+          : "Local";
+      const detail =
+        workspace.workspaceType === "local"
+          ? workspace.path?.trim() || "Local worker"
+          : workspace.directory?.trim() || workspace.baseUrl?.trim() || workspace.openworkHostUrl?.trim() || "Remote worker";
+
+      return {
+        id: workspace.id,
+        label,
+        detail,
+        badge,
+        current: workspace.id === activeWorkspaceId,
+        disabledReason,
+      };
+    });
+
+    return items.sort((a, b) => {
+      if (a.current !== b.current) return a.current ? -1 : 1;
+      return a.label.localeCompare(b.label);
+    });
+  });
+
+  const openSharedBundleCreateWorkerFlow = async () => {
+    const choice = sharedBundleImportChoice();
+    if (!choice || sharedBundleImportBusy()) return;
+
+    setSharedBundleImportError(null);
+    setError(null);
+
+    if (isTauriRuntime()) {
+      setView("dashboard");
+      setTab("scheduled");
+      setSharedBundleCreateWorkerRequest({
+        request: choice.request,
+        bundle: choice.bundle,
+        defaultPreset: "starter",
+      });
+      setSharedBundleImportChoice(null);
+      workspaceStore.setCreateWorkspaceOpen(true);
+      return;
+    }
+
+    setSharedBundleImportBusy(true);
+    try {
+      await createWorkerForSharedBundle(choice.request, choice.bundle);
+      await importSharedBundlePayload(choice.bundle, resolveActiveSharedBundleImportTarget());
+      setSharedBundleImportChoice(null);
+      setError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : safeStringify(error);
+      const friendly = addOpencodeCacheHint(message);
+      setSharedBundleImportError(friendly);
+      setError(friendly);
+    } finally {
+      setSharedBundleImportBusy(false);
+    }
+  };
+
+  const importSharedBundleIntoExistingWorkspace = async (workspaceId: string) => {
+    const choice = sharedBundleImportChoice();
+    if (!choice || sharedBundleImportBusy()) return;
+
+    const workspace = workspaceStore.workspaces().find((item) => item.id === workspaceId) ?? null;
+    if (!workspace) {
+      setSharedBundleImportError("The selected worker is no longer available.");
+      return;
+    }
+
+    const target = resolveSharedBundleImportTargetForWorkspace(workspace);
+    if (!target) {
+      setSharedBundleImportError("This worker cannot accept shared skill imports yet.");
+      return;
+    }
+
+    setSharedBundleImportBusy(true);
+    setSharedBundleImportError(null);
+    setError(null);
+
+    try {
+      setView("dashboard");
+      setTab("skills");
+      const ok = await workspaceStore.activateWorkspace(workspace.id);
+      if (!ok) {
+        throw new Error(error() || `Failed to switch to ${workspace.displayName?.trim() || workspace.name || "the selected worker"}.`);
+      }
+      await importSharedBundlePayload(choice.bundle, target);
+      setSharedBundleImportChoice(null);
+      setError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : safeStringify(error);
+      const friendly = addOpencodeCacheHint(message);
+      setSharedBundleImportError(friendly);
+      setError(friendly);
+    } finally {
+      setSharedBundleImportBusy(false);
+    }
   };
 
   createEffect(() => {
@@ -3359,13 +4255,38 @@ export default function App() {
   const canReloadLocalEngine = () =>
     isTauriRuntime() && workspaceStore.activeWorkspaceDisplay().workspaceType === "local";
 
-  const canReloadWorkspace = createMemo(() => canReloadLocalEngine());
+  const canReloadWorkspace = createMemo(() => {
+    if (canReloadLocalEngine()) return true;
+    if (workspaceStore.activeWorkspaceDisplay().workspaceType !== "remote") return false;
+    return openworkServerStatus() === "connected" && Boolean(openworkServerClient() && openworkServerWorkspaceId());
+  });
 
   const reloadWorkspaceEngineFromUi = async () => {
-    if (!canReloadLocalEngine()) {
+    if (canReloadLocalEngine()) {
+      return workspaceStore.reloadWorkspaceEngine();
+    }
+
+    if (workspaceStore.activeWorkspaceDisplay().workspaceType !== "remote") {
       return false;
     }
-    return workspaceStore.reloadWorkspaceEngine();
+
+    const client = openworkServerClient();
+    const workspaceId = openworkServerWorkspaceId();
+    if (!client || !workspaceId || openworkServerStatus() !== "connected") {
+      setError("Connect to this worker before applying runtime changes.");
+      return false;
+    }
+
+    try {
+      await client.reloadEngine(workspaceId);
+      await workspaceStore.activateWorkspace(workspaceStore.activeWorkspaceId());
+      await refreshMcpServers();
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to apply runtime changes.";
+      setError(message);
+      return false;
+    }
   };
 
   const systemState = createSystemState({
@@ -3392,9 +4313,13 @@ export default function App() {
   });
 
   const {
+    reloadRequired,
+    reloadCopy,
+    reloadTrigger,
     reloadBusy,
     reloadError,
     reloadWorkspaceEngine,
+    clearReloadRequired,
     cacheRepairBusy,
     cacheRepairResult,
     repairOpencodeCache,
@@ -3426,8 +4351,67 @@ export default function App() {
     anyActiveRuns,
   } = systemState;
 
+  markReloadRequiredHandler = systemState.markReloadRequired;
+
   const UPDATE_AUTO_CHECK_EVERY_MS = 12 * 60 * 60_000;
   const UPDATE_AUTO_CHECK_POLL_MS = 60_000;
+
+  const resetAppConfigDefaults = async () => {
+    try {
+      if (typeof window !== "undefined") {
+        try {
+          const sessionOverridePrefix = `${SESSION_MODEL_PREF_KEY}.`;
+          const keysToRemove: string[] = [];
+          for (let index = 0; index < window.localStorage.length; index += 1) {
+            const key = window.localStorage.key(index);
+            if (!key) continue;
+            if (key.startsWith(sessionOverridePrefix)) {
+              keysToRemove.push(key);
+            }
+          }
+          for (const key of keysToRemove) {
+            window.localStorage.removeItem(key);
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      setThemeMode("system");
+      setEngineSource(isTauriRuntime() ? "sidecar" : "path");
+      setEngineCustomBinPath("");
+      setEngineRuntime("openwork-orchestrator");
+      setDefaultModel(DEFAULT_MODEL);
+      setLegacyDefaultModel(DEFAULT_MODEL);
+      setDefaultModelExplicit(false);
+      setShowThinking(false);
+      setHideTitlebar(false);
+      setAutoCompactContext(false);
+      setModelVariant(null);
+      setUpdateAutoCheck(true);
+      setUpdateAutoDownload(false);
+      setUpdateStatus({ state: "idle", lastCheckedAt: null });
+      setDeveloperMode(false);
+
+      clearStartupPreference();
+      setStartupPreference(null);
+      setRememberStartupChoice(false);
+
+      clearOpenworkServerSettings();
+      setOpenworkServerSettings(readOpenworkServerSettings());
+
+      setNotionStatus("disconnected");
+      setNotionStatusDetail(null);
+      setNotionError(null);
+      setNotionSkillInstalled(false);
+      setTryNotionPromptVisible(false);
+
+      return { ok: true, message: "Reset app config defaults. Restart OpenWork if any stale settings remain." };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to reset app config defaults.";
+      return { ok: false, message };
+    }
+  };
 
   const getUpdateLastCheckedAt = (state: ReturnType<typeof updateStatus>) => {
     if (state.state === "checking") return null;
@@ -3475,11 +4459,26 @@ export default function App() {
     await reloadWorkspaceEngine();
   };
 
-  const markReloadRequired = (
-    _reason: ReloadReason,
-    _options?: { force?: boolean; trigger?: ReloadTrigger },
-  ) => {
-    return;
+  const activeReloadBlockingSessions = createMemo(() => {
+    const statuses = sessionStatusById();
+    return sessions()
+      .filter((session) => statuses[session.id] === "running")
+      .map((session) => ({
+        id: session.id,
+        title: session.title?.trim() || session.slug?.trim() || session.id,
+      }));
+  });
+
+  const forceStopActiveSessionsAndReload = async () => {
+    const activeSessions = activeReloadBlockingSessions();
+    for (const session of activeSessions) {
+      try {
+        await abortSession(session.id);
+      } catch {
+        // ignore and continue stopping the rest before reload
+      }
+    }
+    await reloadWorkspaceEngineAndResume();
   };
 
   onMount(() => {
@@ -3609,168 +4608,11 @@ export default function App() {
     if (isWindowsPlatform()) {
       throw new Error("Scheduler is not supported on Windows yet.");
     }
-    const root = workspaceStore.activeWorkspaceRoot().trim();
-    const job = await schedulerDeleteJob(name, root || undefined);
-    setScheduledJobs((current) => current.filter((entry) => entry.slug !== job.slug));
-    return;
-  };
-
-  const resolveSoulWorkspaceMap = async () => {
-    const client = openworkServerClient();
-    if (!client || openworkServerStatus() !== "connected") {
-      return {} as Record<string, string>;
-    }
-
-    const response = await client.listWorkspaces();
-    const items = Array.isArray(response.items) ? response.items : [];
-    const map: Record<string, string> = {};
-
-    const idByLocalPath = new Map<string, string>();
-    for (const item of items) {
-      const path = normalizeDirectoryPath(item.path ?? "");
-      if (!path) continue;
-      idByLocalPath.set(path, item.id);
-    }
-
-    for (const workspace of workspaceStore.workspaces()) {
-      if (workspace.workspaceType === "local") {
-        const key = normalizeDirectoryPath(workspace.path ?? "");
-        if (!key) continue;
-        const found = idByLocalPath.get(key);
-        if (found) {
-          map[workspace.id] = found;
-        }
-        continue;
-      }
-
-      if (workspace.remoteType !== "openwork") {
-        continue;
-      }
-
-      const explicitId =
-        workspace.openworkWorkspaceId?.trim() ||
-        parseOpenworkWorkspaceIdFromUrl(workspace.openworkHostUrl ?? "") ||
-        parseOpenworkWorkspaceIdFromUrl(workspace.baseUrl ?? "");
-      if (explicitId) {
-        map[workspace.id] = explicitId;
-        continue;
-      }
-
-      const directoryHint = normalizeDirectoryPath(workspace.directory ?? workspace.path ?? "");
-      if (!directoryHint) continue;
-      const match = items.find((entry) => {
-        const entryPath = normalizeDirectoryPath(
-          (entry.opencode?.directory ?? entry.directory ?? entry.path ?? "") as string,
-        );
-        return Boolean(entryPath && entryPath === directoryHint);
-      });
-      if (match?.id) {
-        map[workspace.id] = match.id;
-      }
-    }
-
-    return map;
-  };
-
-  const refreshSoulData = async (options?: { force?: boolean }) => {
-    if (soulStatusBusy() && !options?.force) return;
-
-    const client = openworkServerClient();
-    if (!client || openworkServerStatus() !== "connected") {
-      setSoulStatusByWorkspaceId({});
-      setActiveSoulHeartbeats([]);
-      setSoulHeartbeatsBusy(false);
-      setSoulError(null);
-      return;
-    }
-
-    setSoulStatusBusy(true);
-    setSoulError(null);
-    try {
-      const workspaceMap = await resolveSoulWorkspaceMap();
-      const workspaceIds = Object.entries(workspaceMap);
-
-      const nextStatusByWorkspace: Record<string, OpenworkSoulStatus | null> = {};
-      for (const workspace of workspaceStore.workspaces()) {
-        nextStatusByWorkspace[workspace.id] = null;
-      }
-
-      let hadStatusError = false;
-      await Promise.all(
-        workspaceIds.map(async ([workspaceId, openworkId]) => {
-          try {
-            const status = await client.getSoulStatus(openworkId);
-            nextStatusByWorkspace[workspaceId] = status;
-          } catch {
-            hadStatusError = true;
-            nextStatusByWorkspace[workspaceId] = null;
-          }
-        }),
-      );
-      setSoulStatusByWorkspaceId(nextStatusByWorkspace);
-
-      const activeWorkspaceId = workspaceStore.activeWorkspaceId();
-      const activeOpenworkId = workspaceMap[activeWorkspaceId];
-      if (!activeOpenworkId) {
-        setActiveSoulHeartbeats([]);
-        setSoulHeartbeatsBusy(false);
-        if (hadStatusError) {
-          setSoulError("Soul status is partially unavailable.");
-        }
-        return;
-      }
-
-      setSoulHeartbeatsBusy(true);
-      try {
-        const response = await client.listSoulHeartbeats(activeOpenworkId, 30);
-        setActiveSoulHeartbeats(Array.isArray(response.items) ? response.items : []);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to load soul heartbeats.";
-        setActiveSoulHeartbeats([]);
-        setSoulError(message);
-      } finally {
-        setSoulHeartbeatsBusy(false);
-      }
-
-      if (hadStatusError && !soulError()) {
-        setSoulError("Soul status is partially unavailable.");
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to load soul status.";
-      setSoulStatusByWorkspaceId({});
-      setActiveSoulHeartbeats([]);
-      setSoulHeartbeatsBusy(false);
-      setSoulError(message);
-    } finally {
-      setSoulStatusBusy(false);
-    }
-  };
-
-  const activeSoulStatus = createMemo(() => {
-    const id = workspaceStore.activeWorkspaceId();
-    if (!id) return null;
-    return soulStatusByWorkspaceId()[id] ?? null;
-  });
-
-  let lastSoulRefreshKey = "";
-  createEffect(() => {
-    const status = openworkServerStatus();
-    const hasClient = Boolean(openworkServerClient());
-    const activeWorkspaceId = workspaceStore.activeWorkspaceId();
-    const workspacesKey = workspaceStore
-      .workspaces()
-      .map((workspace) => {
-        const root = workspace.workspaceType === "local"
-          ? workspace.path?.trim() ?? ""
-          : workspace.directory?.trim() ?? workspace.path?.trim() ?? "";
-        return [workspace.id, workspace.workspaceType, workspace.remoteType ?? "", root, workspace.openworkWorkspaceId ?? ""].join("|");
-      })
-      .join(";");
-    const key = [status, hasClient ? "1" : "0", activeWorkspaceId, workspacesKey].join("::");
-    if (key === lastSoulRefreshKey) return;
-    lastSoulRefreshKey = key;
-    void refreshSoulData().catch(() => undefined);
-  });
+  const root = workspaceStore.activeWorkspaceRoot().trim();
+  const job = await schedulerDeleteJob(name, root || undefined);
+  setScheduledJobs((current) => current.filter((entry) => entry.slug !== job.slug));
+  return;
+};
 
   createEffect(() => {
     if (!isTauriRuntime()) return;
@@ -3858,18 +4700,9 @@ export default function App() {
     void workspaceStore.onConnectClient();
   });
 
-  createEffect(() => {
-    // If we lose the client (disconnect / stop engine), don't strand the user
-    // in a session view that can't operate.
-    if (currentView() !== "session") return;
-    if (creatingSession()) return;
-    if (client()) return;
-    setView("dashboard");
-  });
-
   const selectedSessionModel = createMemo<ModelRef>(() => {
     const id = selectedSessionId();
-    if (!id) return defaultModel();
+    if (!id) return pendingSessionModel() ?? defaultModel();
 
     const override = sessionModelOverrideById()[id];
     if (override) return override;
@@ -3916,12 +4749,7 @@ export default function App() {
       ];
     }
 
-    const sortedProviders = allProviders.slice().sort((a, b) => {
-      const aIsOpencode = a.id === "opencode";
-      const bIsOpencode = b.id === "opencode";
-      if (aIsOpencode !== bIsOpencode) return aIsOpencode ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
+    const sortedProviders = allProviders.slice().sort(compareProviders);
 
     const next: ModelOption[] = [];
 
@@ -3947,7 +4775,6 @@ export default function App() {
         if (defaultModelID === model.id || isDefault) {
           footerBits.push(t("settings.model_default", currentLocale()));
         }
-        if (isFree) footerBits.push(t("settings.model_free", currentLocale()));
         if (model.reasoning) footerBits.push(t("settings.model_reasoning", currentLocale()));
 
         next.push({
@@ -3968,6 +4795,9 @@ export default function App() {
     next.sort((a, b) => {
       if (a.isConnected !== b.isConnected) return a.isConnected ? -1 : 1;
       if (a.isFree !== b.isFree) return a.isFree ? -1 : 1;
+      const providerRankDiff =
+        providerPriorityRank(a.providerID) - providerPriorityRank(b.providerID);
+      if (providerRankDiff !== 0) return providerRankDiff;
       return a.title.localeCompare(b.title);
     });
 
@@ -4016,6 +4846,9 @@ export default function App() {
 
     const id = selectedSessionId();
     if (!id) {
+      setPendingSessionModel(next);
+      setDefaultModelExplicit(true);
+      setDefaultModel(next);
       setModelPickerOpen(false);
       return;
     }
@@ -4032,6 +4865,10 @@ export default function App() {
     }
   }
 
+  function openSettingsFromModelPicker() {
+    setTab("settings");
+    setView("dashboard");
+  }
 
   async function connectNotion() {
     if (workspaceStore.activeWorkspaceDisplay().workspaceType !== "local") {
@@ -4120,6 +4957,11 @@ export default function App() {
   }
 
   async function refreshMcpServers() {
+    const filterConfiguredStatuses = (status: McpStatusMap, entries: McpServerEntry[]) => {
+      const configured = new Set(entries.map((entry) => entry.name));
+      return Object.fromEntries(Object.entries(status).filter(([name]) => configured.has(name))) as McpStatusMap;
+    };
+
     const projectDir = workspaceProjectDir().trim();
     const isRemoteWorkspace = workspaceStore.activeWorkspaceDisplay().workspaceType === "remote";
     const isLocalWorkspace = !isRemoteWorkspace;
@@ -4154,7 +4996,7 @@ export default function App() {
         if (activeClient && projectDir) {
           try {
             const status = unwrap(await activeClient.mcp.status({ directory: projectDir }));
-            setMcpStatuses(status as McpStatusMap);
+            setMcpStatuses(filterConfiguredStatuses(status as McpStatusMap, next));
           } catch {
             setMcpStatuses({});
           }
@@ -4188,7 +5030,7 @@ export default function App() {
         if (activeClient && projectDir) {
           try {
             const status = unwrap(await activeClient.mcp.status({ directory: projectDir }));
-            setMcpStatuses(status as McpStatusMap);
+            setMcpStatuses(filterConfiguredStatuses(status as McpStatusMap, next));
           } catch {
             setMcpStatuses({});
           }
@@ -4239,7 +5081,7 @@ export default function App() {
       if (activeClient) {
         try {
           const status = unwrap(await activeClient.mcp.status({ directory: projectDir }));
-          setMcpStatuses(status as McpStatusMap);
+          setMcpStatuses(filterConfiguredStatuses(status as McpStatusMap, next));
         } catch {
           setMcpStatuses({});
         }
@@ -4355,7 +5197,7 @@ export default function App() {
       return;
     }
 
-    const slug = entry.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const slug = entry.id ?? entry.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
     try {
       setMcpStatus(null);
@@ -4448,6 +5290,7 @@ export default function App() {
 
       if (entry.oauth) {
         setMcpAuthEntry(entry);
+        setMcpAuthNeedsReload(true);
         setMcpAuthModalOpen(true);
       } else {
         setMcpStatus(t("mcp.connected", currentLocale()));
@@ -4469,6 +5312,30 @@ export default function App() {
     } finally {
       setMcpConnectingName(null);
     }
+  }
+
+  function authorizeMcp(entry: McpServerEntry) {
+    if (entry.config.type !== "remote" || entry.config.oauth === false) {
+      setMcpStatus(t("mcp.login_unavailable", currentLocale()));
+      return;
+    }
+
+    const matchingQuickConnect = MCP_QUICK_CONNECT.find((candidate) => {
+      const candidateSlug = candidate.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      return candidateSlug === entry.name || candidate.name === entry.name;
+    });
+
+    setMcpAuthEntry(
+      matchingQuickConnect ?? {
+        name: entry.name,
+        description: "",
+        type: "remote",
+        url: entry.config.url,
+        oauth: true,
+      },
+    );
+    setMcpAuthNeedsReload(false);
+    setMcpAuthModalOpen(true);
   }
 
   async function logoutMcpAuth(name: string) {
@@ -4694,11 +5561,20 @@ export default function App() {
       }
 
       const session = unwrap(rawResult);
+      const pendingModel = pendingSessionModel();
       // Immediately select and show the new session before background list refresh.
       setBusyLabel("status.loading_session");
       mark("session:select:start", { sessionID: session.id });
       await selectSession(session.id);
       mark("session:select:ok", { sessionID: session.id });
+
+      if (pendingModel) {
+        setSessionModelOverrideById((current) => ({
+          ...current,
+          [session.id]: pendingModel,
+        }));
+        setPendingSessionModel(null);
+      }
 
       // Inject the new session into the reactive sessions() store so
       // the createEffect bridge (sessions → sidebar) will always include it,
@@ -4712,6 +5588,7 @@ export default function App() {
         id: session.id,
         title: session.title,
         slug: session.slug,
+        parentID: session.parentID,
         time: session.time,
         directory: session.directory,
       };
@@ -4754,26 +5631,6 @@ export default function App() {
       setCreatingSession(false);
       setBusy(false);
     }
-  }
-
-  function runSoulPrompt(promptText: string) {
-    const text = promptText.trim();
-    if (!text) return;
-    void (async () => {
-      const sessionId = await createSessionAndOpen();
-      if (!sessionId) {
-        setPrompt(text);
-        return;
-      }
-
-      await sendPrompt({
-        mode: "prompt",
-        text,
-        resolvedText: text,
-        parts: [{ type: "text", text }],
-        attachments: [],
-      });
-    })();
   }
 
 
@@ -4985,23 +5842,68 @@ export default function App() {
 
       try {
         const { getCurrent, onOpenUrl } = await import("@tauri-apps/plugin-deep-link");
-        const consumeUrls = (urls: string[] | null | undefined) => {
+        const recentDeepLinkEvents = new Map<string, number>();
+        let lastObservedDeepLinkSignature: string | null = null;
+
+        const consumeUrls = (
+          urls: string[] | null | undefined,
+          source: "event" | "current" = "event",
+        ) => {
           if (!Array.isArray(urls)) {
             return;
           }
-          for (const url of urls) {
+
+          const normalized = urls.map((url) => url.trim()).filter(Boolean);
+          if (normalized.length === 0) {
+            return;
+          }
+
+          const signature = normalized.join("\n");
+          if (source === "current" && signature === lastObservedDeepLinkSignature) {
+            return;
+          }
+          lastObservedDeepLinkSignature = signature;
+
+          const now = Date.now();
+          for (const [url, seenAt] of recentDeepLinkEvents) {
+            if (now - seenAt > 1500) {
+              recentDeepLinkEvents.delete(url);
+            }
+          }
+
+          for (const url of normalized) {
+            const seenAt = recentDeepLinkEvents.get(url) ?? 0;
+            if (now - seenAt < 1500) {
+              continue;
+            }
+            recentDeepLinkEvents.set(url, now);
             if (queueRemoteConnectDeepLink(url) || queueSharedBundleDeepLink(url)) {
               break;
             }
           }
         };
 
-        consumeUrls(await getCurrent());
+        const syncCurrentDeepLinks = async () => {
+          consumeUrls(await getCurrent(), "current");
+        };
+
+        await syncCurrentDeepLinks();
         const unlisten = await onOpenUrl((urls) => {
-          consumeUrls(urls);
+          consumeUrls(urls, "event");
         });
+        const handleWindowFocus = () => {
+          void syncCurrentDeepLinks().catch(() => undefined);
+        };
+        const handleVisibilityChange = () => {
+          if (document.visibilityState !== "visible") return;
+          void syncCurrentDeepLinks().catch(() => undefined);
+        };
+        window.addEventListener("focus", handleWindowFocus);
+        document.addEventListener("visibilitychange", handleVisibilityChange);
         onCleanup(() => {
           unlisten();
+          window.removeEventListener("focus", handleWindowFocus);
+          document.removeEventListener("visibilitychange", handleVisibilityChange);
         });
       } catch {
         // ignore
@@ -5169,9 +6071,7 @@ export default function App() {
           await openworkClient.patchConfig(openworkWorkspaceId, {
             opencode: { model: formatModelRef(nextModel) },
           });
-          markReloadRequired("config", {
-            trigger: { type: "config", name: "opencode.json", action: "updated" },
-          });
+          markReloadRequired("config", { type: "config", name: "opencode.json", action: "updated" });
           return;
         }
 
@@ -5185,9 +6085,7 @@ export default function App() {
           throw new Error(result.stderr || result.stdout || "Failed to update opencode.json");
         }
         setLastKnownConfigSnapshot(getConfigSnapshot(content));
-        markReloadRequired("config", {
-          trigger: { type: "config", name: "opencode.json", action: "updated" },
-        });
+        markReloadRequired("config", { type: "config", name: "opencode.json", action: "updated" });
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : safeStringify(error);
@@ -5629,12 +6527,15 @@ export default function App() {
       providerAuthError: providerAuthError(),
       providerAuthMethods: providerAuthMethods(),
       openProviderAuthModal,
+      disconnectProvider,
       closeProviderAuthModal,
       startProviderAuth,
       completeProviderAuthOAuth,
+      refreshProviders,
       submitProviderApiKey,
       view: currentView(),
       setView,
+      toggleSettings: () => toggleSettingsView("general"),
       startupPreference: startupPreference(),
       baseUrl: baseUrl(),
       clientConnected: Boolean(client()),
@@ -5708,15 +6609,8 @@ export default function App() {
       refreshScheduledJobs: (options?: { force?: boolean }) =>
         refreshScheduledJobs(options).catch(() => undefined),
       deleteScheduledJob,
-      soulStatusByWorkspaceId: soulStatusByWorkspaceId(),
-      activeSoulStatus: activeSoulStatus(),
-      activeSoulHeartbeats: activeSoulHeartbeats(),
-      soulStatusBusy: soulStatusBusy(),
-      soulHeartbeatsBusy: soulHeartbeatsBusy(),
-      soulError: soulError(),
-      refreshSoulData: (options?: { force?: boolean }) => refreshSoulData(options).catch(() => undefined),
-      runSoulPrompt,
       activeWorkspaceRoot: workspaceStore.activeWorkspaceRoot().trim(),
+      isRemoteWorkspace: workspaceStore.activeWorkspaceDisplay().workspaceType === "remote",
       refreshSkills: (options?: { force?: boolean }) => refreshSkills(options).catch(() => undefined),
       refreshHubSkills: (options?: { force?: boolean }) => refreshHubSkills(options).catch(() => undefined),
       refreshPlugins: (scopeOverride?: PluginScope) =>
@@ -5725,12 +6619,17 @@ export default function App() {
       skillsStatus: skillsStatus(),
       hubSkills: hubSkills(),
       hubSkillsStatus: hubSkillsStatus(),
+      hubRepo: hubRepo(),
+      hubRepos: hubRepos(),
       skillsAccessHint,
       canInstallSkillCreator,
       canUseDesktopTools,
       importLocalSkill,
       installSkillCreator,
       installHubSkill,
+      setHubRepo,
+      addHubRepo,
+      removeHubRepo,
       revealSkillsFolder,
       uninstallSkill,
       readSkill,
@@ -5806,6 +6705,8 @@ export default function App() {
       pendingPermissions: pendingPermissions(),
       events: events(),
       workspaceDebugEvents: workspaceStore.workspaceDebugEvents(),
+      sandboxCreateProgress: workspaceStore.sandboxCreateProgress(),
+      sandboxCreateProgressLast: workspaceStore.lastSandboxCreateProgress(),
       clearWorkspaceDebugEvents: workspaceStore.clearWorkspaceDebugEvents,
       safeStringify,
       repairOpencodeMigration: workspaceStore.repairOpencodeMigration,
@@ -5819,11 +6720,13 @@ export default function App() {
       cleanupOpenworkDockerContainers,
       dockerCleanupBusy: dockerCleanupBusy(),
       dockerCleanupResult: dockerCleanupResult(),
+      resetAppConfigDefaults,
       notionStatus: notionStatus(),
       notionStatusDetail: notionStatusDetail(),
       notionError: notionError(),
       notionBusy: notionBusy(),
       connectNotion,
+      openDebugShareLink,
       mcpServers: mcpServers(),
       mcpStatus: mcpStatus(),
       mcpLastUpdatedAt: mcpLastUpdatedAt(),
@@ -5833,6 +6736,7 @@ export default function App() {
       setSelectedMcp,
       quickConnect: MCP_QUICK_CONNECT,
       connectMcp,
+      authorizeMcp,
       logoutMcpAuth,
       removeMcp,
       refreshMcpServers,
@@ -5871,6 +6775,7 @@ export default function App() {
     tab: tab(),
     setTab,
     setSettingsTab,
+    toggleSettings: () => toggleSettingsView("general"),
     activeWorkspaceDisplay: activeWorkspaceDisplay(),
     activeWorkspaceRoot: workspaceStore.activeWorkspaceRoot().trim(),
     workspaces: workspaceStore.workspaces(),
@@ -5890,7 +6795,6 @@ export default function App() {
     exportWorkspaceBusy: workspaceStore.exportingWorkspaceConfig(),
     clientConnected: Boolean(client()),
     openworkServerStatus: openworkServerStatus(),
-    startupPreference: startupPreference(),
     openworkServerClient: openworkServerClient(),
     openworkServerSettings: openworkServerSettings(),
     openworkServerHostInfo: openworkServerHostInfo(),
@@ -5915,6 +6819,17 @@ export default function App() {
     mcpStatus: mcpStatus(),
     skills: skills(),
     skillsStatus: skillsStatus(),
+    showSkillReloadBanner: reloadRequired() && reloadTrigger()?.type === "skill",
+    reloadBannerTitle: reloadCopy().title,
+    reloadBannerBody: reloadCopy().body,
+    reloadBannerBlocked: activeReloadBlockingSessions().length > 0,
+    reloadBannerActiveCount: activeReloadBlockingSessions().length,
+    canReloadWorkspace: canReloadWorkspace(),
+    reloadWorkspaceEngine: reloadWorkspaceEngineAndResume,
+    forceStopActiveConversations: forceStopActiveSessionsAndReload,
+    dismissReloadBanner: clearReloadRequired,
+    reloadBusy: reloadBusy(),
+    reloadError: reloadError(),
     createSessionAndOpen: createSessionAndOpen,
     sendPromptAsync: sendPrompt,
     abortSession: abortSession,
@@ -5926,10 +6841,13 @@ export default function App() {
     retryLastPrompt: retryLastPrompt,
     newTaskDisabled: newTaskDisabled(),
     workspaceSessionGroups: sidebarWorkspaceGroups(),
-    soulStatusByWorkspaceId: soulStatusByWorkspaceId(),
     openRenameWorkspace,
     selectSession: selectSession,
     messages: visibleMessages(),
+    getSessionById: sessionById,
+    getMessagesBySessionId: messagesBySessionId,
+    ensureSessionLoaded,
+    sessionLoadingById,
     todos: activeTodos(),
     busyLabel: busyLabel(),
     developerMode: developerMode(),
@@ -5959,6 +6877,7 @@ export default function App() {
     showTryNotionPrompt: tryNotionPromptVisible() && notionIsActive(),
     startProviderAuth: startProviderAuth,
     completeProviderAuthOAuth: completeProviderAuthOAuth,
+    refreshProviders: refreshProviders,
     submitProviderApiKey: submitProviderApiKey,
     openProviderAuthModal: openProviderAuthModal,
     closeProviderAuthModal: closeProviderAuthModal,
@@ -5974,6 +6893,9 @@ export default function App() {
     setSessionAgent: setSessionAgent,
     saveSession: saveSessionExport,
     sessionStatusById: activeSessionStatusById(),
+    hasEarlierMessages: selectedSessionHasEarlierMessages(),
+    loadingEarlierMessages: selectedSessionLoadingEarlierMessages(),
+    loadEarlierMessages,
     searchFiles: searchWorkspaceFiles,
     deleteSession: deleteSessionById,
     onTryNotionPrompt: () => {
@@ -5993,7 +6915,6 @@ export default function App() {
 
   const dashboardTabs = new Set<DashboardTab>([
     "scheduled",
-    "soul",
     "skills",
     "plugins",
     "mcp",
@@ -6042,9 +6963,10 @@ export default function App() {
       const id = (sessionSegment ?? "").trim();
 
       if (!id) {
-        const fallback = activeSessionId();
-        if (fallback) {
-          goToSession(fallback, { replace: true });
+        if (selectedSessionId()) {
+          setSelectedSessionId(null);
+          setMessages([]);
+          setTodos([]);
         }
         return;
       }
@@ -6137,6 +7059,7 @@ export default function App() {
         target={modelPickerTarget()}
         current={modelPickerCurrent()}
         onSelect={applyModelSelection}
+        onOpenSettings={openSettingsFromModelPicker}
         onClose={() => setModelPickerOpen(false)}
       />
 
@@ -6163,19 +7086,40 @@ export default function App() {
         entry={mcpAuthEntry()}
         projectDir={workspaceProjectDir()}
         language={currentLocale()}
-        reloadRequired={false}
-        reloadBlocked={anyActiveRuns()}
+        reloadRequired={mcpAuthNeedsReload()}
+        reloadBlocked={activeReloadBlockingSessions().length > 0}
+        activeSessions={activeReloadBlockingSessions()}
         isRemoteWorkspace={activeWorkspaceDisplay().workspaceType === "remote"}
+        onForceStopSession={(sessionID) => abortSession(sessionID)}
         onClose={() => {
           setMcpAuthModalOpen(false);
           setMcpAuthEntry(null);
+          setMcpAuthNeedsReload(false);
         }}
         onComplete={async () => {
           setMcpAuthModalOpen(false);
           setMcpAuthEntry(null);
+          setMcpAuthNeedsReload(false);
           await refreshMcpServers();
         }}
         onReloadEngine={() => reloadWorkspaceEngineAndResume()}
+      />
+
+      <SharedBundleImportModal
+        open={Boolean(sharedBundleImportChoice())}
+        title={sharedBundleImportCopy()?.title ?? "Import shared bundle"}
+        description={sharedBundleImportCopy()?.description ?? "Choose how to import this shared bundle."}
+        items={sharedBundleImportCopy()?.items ?? []}
+        workers={sharedBundleWorkerOptions()}
+        busy={sharedBundleImportBusy()}
+        error={sharedBundleImportError()}
+        onClose={closeSharedBundleImportChoice}
+        onCreateNewWorker={() => {
+          void openSharedBundleCreateWorkerFlow();
+        }}
+        onSelectWorker={(workspaceId) => {
+          void importSharedBundleIntoExistingWorkspace(workspaceId);
+        }}
       />
 
       <CreateWorkspaceModal
@@ -6183,20 +7127,62 @@ export default function App() {
         onClose={() => {
           workspaceStore.setCreateWorkspaceOpen(false);
           workspaceStore.clearSandboxCreateProgress?.();
+          setSharedBundleCreateWorkerRequest(null);
         }}
         onPickFolder={workspaceStore.pickWorkspaceFolder}
-        onConfirm={(preset, folder) =>
-          workspaceStore.createWorkspaceFlow(preset, folder)
-        }
+        defaultPreset={createWorkspaceDefaultPreset()}
+        onConfirm={async (preset, folder) => {
+          const request = sharedBundleCreateWorkerRequest();
+          const ok = await workspaceStore.createWorkspaceFlow(preset, folder);
+          if (!ok || !request) return;
+          const imported = await importSharedBundleIntoActiveWorker(request.request, {
+            localRoot: workspaceStore.activeWorkspaceRoot().trim(),
+          }, request.bundle);
+          setSharedBundleCreateWorkerRequest(null);
+          if (imported) {
+            if (request.bundle.type === "skill") {
+              showSharedSkillSuccessToast({
+                title: "Skill added",
+                description: `Added '${request.bundle.name.trim() || "Shared skill"}' to ${describeWorkspaceForToasts(workspaceStore.activeWorkspaceDisplay())}.`,
+              });
+            }
+            setSharedSkillDestinationRequest(null);
+          }
+        }}
         onConfirmWorker={
           isTauriRuntime()
             ? async (preset, folder) => {
-                const ok = await workspaceStore.createSandboxFlow(preset, folder, {
-                  onReady: async () => {
-                    await createSessionAndOpen();
-                  },
-                });
+                const request = sharedBundleCreateWorkerRequest();
+                const ok = await workspaceStore.createSandboxFlow(
+                  preset,
+                  folder,
+                  request
+                    ? {
+                        onReady: async () => {
+                          const active = workspaceStore.activeWorkspaceDisplay();
+                          await importSharedBundleIntoActiveWorker(request.request, {
+                            workspaceId:
+                              active.openworkWorkspaceId?.trim() ||
+                              parseOpenworkWorkspaceIdFromUrl(active.openworkHostUrl ?? "") ||
+                              parseOpenworkWorkspaceIdFromUrl(active.baseUrl ?? "") ||
+                              null,
+                            directoryHint: active.directory?.trim() || active.path?.trim() || null,
+                          }, request.bundle);
+                          if (request.bundle.type === "skill") {
+                            showSharedSkillSuccessToast({
+                              title: "Skill added",
+                              description: `Added '${request.bundle.name.trim() || "Shared skill"}' to ${describeWorkspaceForToasts(active)}.`,
+                            });
+                          }
+                        },
+                      }
+                    : undefined,
+                );
                 if (!ok) return;
+                setSharedBundleCreateWorkerRequest(null);
+                if (request) {
+                  setSharedSkillDestinationRequest(null);
+                }
               }
             : undefined
         }
@@ -6262,6 +7248,50 @@ export default function App() {
         submittingProgress={workspaceStore.sandboxCreateProgress?.() ?? null}
       />
 
+      <SharedSkillDestinationModal
+        open={
+          Boolean(sharedSkillDestinationRequest()) &&
+          !workspaceStore.createWorkspaceOpen() &&
+          !workspaceStore.createRemoteWorkspaceOpen()
+        }
+        skill={(() => {
+          const request = sharedSkillDestinationRequest();
+          if (!request) return null;
+          return {
+            name: request.bundle.name,
+            description: request.bundle.description ?? null,
+            trigger: request.bundle.trigger ?? null,
+          };
+        })()}
+        workspaces={sharedSkillDestinationWorkspaces()}
+        activeWorkspaceId={workspaceStore.activeWorkspaceId()}
+        busyWorkspaceId={sharedSkillDestinationBusyId()}
+        onClose={() => {
+          if (sharedSkillDestinationBusyId()) return;
+          setSharedSkillDestinationRequest(null);
+        }}
+        onSubmitWorkspace={importSharedSkillIntoWorkspace}
+        onCreateWorker={
+          isTauriRuntime()
+            ? () => {
+                const request = sharedSkillDestinationRequest();
+                if (!request) return;
+                setError(null);
+                setSharedBundleCreateWorkerRequest({
+                  request: request.request,
+                  bundle: request.bundle,
+                  defaultPreset: "starter",
+                });
+                workspaceStore.setCreateWorkspaceOpen(true);
+              }
+            : undefined
+        }
+        onConnectRemote={() => {
+          setError(null);
+          workspaceStore.setCreateRemoteWorkspaceOpen(true);
+        }}
+      />
+
       <CreateRemoteWorkspaceModal
         open={workspaceStore.createRemoteWorkspaceOpen()}
         onClose={() => {
@@ -6275,6 +7305,20 @@ export default function App() {
           (busyLabel() === "status.creating_workspace" || busyLabel() === "status.connecting")
         }
       />
+
+      <div class="pointer-events-none fixed right-4 top-4 z-50 flex w-[min(24rem,calc(100vw-1.5rem))] max-w-full flex-col gap-3 sm:right-6 sm:top-6">
+        <div class="pointer-events-auto">
+          <StatusToast
+            open={Boolean(sharedSkillSuccessToast())}
+            tone="success"
+            title={sharedSkillSuccessToast()?.title ?? "Skill added"}
+            description={sharedSkillSuccessToast()?.description ?? null}
+            dismissLabel="Dismiss"
+            onDismiss={clearSharedSkillSuccessToast}
+          />
+        </div>
+
+      </div>
 
       <RenameWorkspaceModal
         open={renameWorkspaceOpen()}

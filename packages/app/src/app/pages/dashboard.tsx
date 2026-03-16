@@ -9,6 +9,7 @@ import type {
   SettingsTab,
   ScheduledJob,
   HubSkillCard,
+  HubSkillRepo,
   SkillCard,
   StartupPreference,
   WorkspaceConnectionState,
@@ -23,6 +24,9 @@ import {
   isWindowsPlatform,
   normalizeDirectoryPath,
 } from "../utils";
+import { usePlatform } from "../context/platform";
+import { FEEDBACK_EMAIL_URL } from "../lib/feedback";
+import { createWorkspaceShellLayout } from "../lib/workspace-shell-layout";
 import {
   buildOpenworkConnectInviteUrl,
   buildOpenworkWorkspaceBaseUrl,
@@ -31,8 +35,6 @@ import {
 } from "../lib/openwork-server";
 import type {
   OpenworkAuditEntry,
-  OpenworkSoulHeartbeatEntry,
-  OpenworkSoulStatus,
   OpenworkServerClient,
   OpenworkServerCapabilities,
   OpenworkServerDiagnostics,
@@ -46,7 +48,6 @@ import { DEFAULT_OPENWORK_PUBLISHER_BASE_URL, publishOpenworkBundleJson } from "
 import Button from "../components/button";
 import ExtensionsView from "./extensions";
 import ScheduledTasksView from "./scheduled";
-import SoulView from "./soul";
 import ConfigView from "./config";
 import SettingsView from "./settings";
 import SkillsView from "./skills";
@@ -57,16 +58,15 @@ import ShareWorkspaceModal from "../components/share-workspace-modal";
 import WorkspaceSessionList from "../components/session/workspace-session-list";
 import {
   Box,
-  ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Circle,
   History,
-  HeartPulse,
   Loader2,
+  Menu,
   MessageCircle,
   MoreHorizontal,
   Plus,
-  Settings,
   SlidersHorizontal,
   Zap,
 } from "lucide-solid";
@@ -84,12 +84,19 @@ export type DashboardViewProps = {
   providerAuthError: string | null;
   providerAuthMethods: Record<string, { type: "oauth" | "api"; label: string }[]>;
   openProviderAuthModal: () => Promise<void>;
+  disconnectProvider: (providerId: string) => Promise<string | void>;
   closeProviderAuthModal: () => void;
   startProviderAuth: (providerId?: string) => Promise<ProviderOAuthStartResult>;
-  completeProviderAuthOAuth: (providerId: string, methodIndex: number, code?: string) => Promise<string | void>;
+  completeProviderAuthOAuth: (
+    providerId: string,
+    methodIndex: number,
+    code?: string
+  ) => Promise<{ connected: boolean; pending?: boolean; message?: string }>;
   submitProviderApiKey: (providerId: string, apiKey: string) => Promise<string | void>;
+  refreshProviders: () => Promise<unknown>;
   view: View;
   setView: (view: View, sessionId?: string) => void;
+  toggleSettings: () => void;
   startupPreference: StartupPreference | null;
   baseUrl: string;
   clientConnected: boolean;
@@ -158,15 +165,8 @@ export type DashboardViewProps = {
   scheduledJobsUpdatedAt: number | null;
   refreshScheduledJobs: (options?: { force?: boolean }) => void;
   deleteScheduledJob: (name: string) => Promise<void> | void;
-  soulStatusByWorkspaceId: Record<string, OpenworkSoulStatus | null>;
-  activeSoulStatus: OpenworkSoulStatus | null;
-  activeSoulHeartbeats: OpenworkSoulHeartbeatEntry[];
-  soulStatusBusy: boolean;
-  soulHeartbeatsBusy: boolean;
-  soulError: string | null;
-  refreshSoulData: (options?: { force?: boolean }) => void;
-  runSoulPrompt: (prompt: string) => void;
   activeWorkspaceRoot: string;
+  isRemoteWorkspace: boolean;
   refreshSkills: (options?: { force?: boolean }) => void;
   refreshHubSkills: (options?: { force?: boolean }) => void;
   refreshPlugins: (scopeOverride?: PluginScope) => void;
@@ -175,12 +175,17 @@ export type DashboardViewProps = {
   skillsStatus: string | null;
   hubSkills: HubSkillCard[];
   hubSkillsStatus: string | null;
+  hubRepo: HubSkillRepo | null;
+  hubRepos: HubSkillRepo[];
   skillsAccessHint?: string | null;
   canInstallSkillCreator: boolean;
   canUseDesktopTools: boolean;
   importLocalSkill: () => void;
   installSkillCreator: () => Promise<{ ok: boolean; message: string }>;
   installHubSkill: (name: string) => Promise<{ ok: boolean; message: string }>;
+  setHubRepo: (repo: Partial<HubSkillRepo> | null) => void;
+  addHubRepo: (repo: Partial<HubSkillRepo>) => void;
+  removeHubRepo: (repo: Partial<HubSkillRepo>) => void;
   revealSkillsFolder: () => void;
   uninstallSkill: (name: string) => void;
   readSkill: (name: string) => Promise<{ name: string; path: string; content: string } | null>;
@@ -225,6 +230,7 @@ export type DashboardViewProps = {
   setSelectedMcp: (value: string | null) => void;
   quickConnect: McpDirectoryInfo[];
   connectMcp: (entry: McpDirectoryInfo) => void;
+  authorizeMcp: (entry: McpServerEntry) => void;
   logoutMcpAuth: (name: string) => Promise<void> | void;
   removeMcp: (name: string) => void;
   showMcpReloadBanner: boolean;
@@ -285,6 +291,8 @@ export type DashboardViewProps = {
   pendingPermissions: unknown;
   events: unknown;
   workspaceDebugEvents: unknown;
+  sandboxCreateProgress: unknown;
+  sandboxCreateProgressLast: unknown;
   clearWorkspaceDebugEvents: () => void;
   safeStringify: (value: unknown) => string;
   repairOpencodeMigration: () => void;
@@ -298,11 +306,13 @@ export type DashboardViewProps = {
   cleanupOpenworkDockerContainers: () => void;
   dockerCleanupBusy: boolean;
   dockerCleanupResult: string | null;
+  resetAppConfigDefaults: () => Promise<{ ok: boolean; message: string }>;
   notionStatus: "disconnected" | "connecting" | "connected" | "error";
   notionStatusDetail: string | null;
   notionError: string | null;
   notionBusy: boolean;
   connectNotion: () => void;
+  openDebugShareLink: (rawUrl: string) => Promise<{ ok: boolean; message: string }>;
 };
 
 type SharedSkillItem = {
@@ -333,12 +343,11 @@ type SkillsSetBundleV1 = {
 };
 
 export default function DashboardView(props: DashboardViewProps) {
+  const platform = usePlatform();
   const title = createMemo(() => {
     switch (props.tab) {
       case "scheduled":
         return "自动化";
-      case "soul":
-        return "灵魂";
       case "skills":
         return "技能";
       case "plugins":
@@ -350,9 +359,9 @@ export default function DashboardView(props: DashboardViewProps) {
       case "config":
         return "高级";
       case "settings":
-        return "设置";
+        return "Settings";
       default:
-        return "Automations";
+        return "自动化";
     }
   });
 
@@ -402,6 +411,19 @@ export default function DashboardView(props: DashboardViewProps) {
   const [refreshInProgress, setRefreshInProgress] = createSignal(false);
   const [providerAuthActionBusy, setProviderAuthActionBusy] = createSignal(false);
   const [shareWorkspaceId, setShareWorkspaceId] = createSignal<string | null>(null);
+  const {
+    leftSidebarWidth,
+    rightSidebarExpanded,
+    rightSidebarWidth,
+    startLeftSidebarResize,
+    toggleRightSidebar,
+  } = createWorkspaceShellLayout({ expandedRightWidth: 280 });
+
+  const openFeedback = () => {
+    const resolved = FEEDBACK_EMAIL_URL.trim();
+    if (!resolved) return;
+    platform.openLink(resolved);
+  };
 
   const handleProviderAuthSelect = async (providerId: string): Promise<ProviderOAuthStartResult> => {
     if (providerAuthActionBusy()) {
@@ -416,13 +438,17 @@ export default function DashboardView(props: DashboardViewProps) {
   };
 
   const handleProviderAuthOAuth = async (providerId: string, methodIndex: number, code?: string) => {
-    if (providerAuthActionBusy()) return;
+    if (providerAuthActionBusy()) return { connected: false, pending: true };
     setProviderAuthActionBusy(true);
     try {
-      await props.completeProviderAuthOAuth(providerId, methodIndex, code);
-      props.closeProviderAuthModal();
+      const result = await props.completeProviderAuthOAuth(providerId, methodIndex, code);
+      if (result.connected) {
+        props.closeProviderAuthModal();
+      }
+      return result;
     } catch {
       // Errors are surfaced in the modal.
+      return { connected: false };
     } finally {
       setProviderAuthActionBusy(false);
     }
@@ -471,9 +497,6 @@ export default function DashboardView(props: DashboardViewProps) {
         if (currentTab === "scheduled" && !cancelled) {
           await props.refreshScheduledJobs();
         }
-        if (currentTab === "soul" && !cancelled) {
-          await props.refreshSoulData();
-        }
       } catch {
         // Ignore errors during navigation
       } finally {
@@ -491,27 +514,26 @@ export default function DashboardView(props: DashboardViewProps) {
     });
   });
 
-  const soulModeEnabled = createMemo(() => {
-    const status = props.soulStatusByWorkspaceId[props.activeWorkspaceId];
-    return Boolean(status?.enabled ?? props.activeSoulStatus?.enabled);
-  });
-
-  const soulNavIconClass = () => (soulModeEnabled() ? "soul-nav-icon-active" : "");
-
   const navItem = (t: DashboardTab, label: string, icon: any) => {
     const active = () => props.tab === t || (t === "mcp" && props.tab === "plugins");
     return (
       <button
         type="button"
-        class={`w-full h-10 flex items-center gap-3 px-3 rounded-lg text-sm font-medium transition-colors ${
+        class={`w-full border text-[13px] font-medium transition-[background-color,border-color,box-shadow,color] ${
           active()
-            ? "bg-dls-active text-dls-text"
-            : "text-dls-secondary hover:text-dls-text hover:bg-dls-hover"
+            ? "border-dls-border bg-dls-surface text-dls-text shadow-[var(--dls-card-shadow)]"
+            : "border-transparent text-dls-secondary hover:border-dls-border hover:bg-dls-surface hover:text-dls-text"
+        } ${
+          rightSidebarExpanded()
+            ? "flex min-h-11 items-center justify-start gap-2.5 rounded-[16px] px-3.5"
+            : "flex h-12 items-center justify-center rounded-[16px] px-0"
         }`}
         onClick={() => props.setTab(t)}
+        title={label}
+        aria-label={label}
       >
         {icon}
-        {label}
+        <Show when={rightSidebarExpanded()}>{label}</Show>
       </button>
     );
   };
@@ -523,17 +545,6 @@ export default function DashboardView(props: DashboardViewProps) {
 
   const openConfig = () => {
     props.setTab(props.developerMode ? "config" : "identities");
-  };
-
-  const openSoulForWorkspace = (workspaceId?: string) => {
-    const id = (workspaceId ?? props.activeWorkspaceId).trim();
-    if (!id) return;
-    void (async () => {
-      if (id !== props.activeWorkspaceId) {
-        await Promise.resolve(props.activateWorkspace(id));
-      }
-      props.setTab("soul");
-    })();
   };
 
   const revealWorkspaceInFinder = async (workspaceId: string) => {
@@ -606,7 +617,10 @@ export default function DashboardView(props: DashboardViewProps) {
   createEffect(() => {
     const ws = shareWorkspace();
     const baseUrl = props.openworkServerHostInfo?.baseUrl?.trim() ?? "";
-    const token = props.openworkServerHostInfo?.clientToken?.trim() ?? "";
+    const token =
+      props.openworkServerHostInfo?.ownerToken?.trim() ||
+      props.openworkServerHostInfo?.clientToken?.trim() ||
+      "";
     const workspacePath = ws?.workspaceType === "local" ? ws.path?.trim() ?? "" : "";
 
     if (!ws || ws.workspaceType !== "local" || !workspacePath || !baseUrl || !token) {
@@ -659,10 +673,12 @@ export default function DashboardView(props: DashboardViewProps) {
         ? buildOpenworkWorkspaceBaseUrl(hostUrl, shareLocalOpenworkWorkspaceId())
         : null;
       const url = mountedUrl || hostUrl;
-      const token = props.openworkServerHostInfo?.clientToken?.trim() || "";
+      const ownerToken = props.openworkServerHostInfo?.ownerToken?.trim() || "";
+      const collaboratorToken = props.openworkServerHostInfo?.clientToken?.trim() || "";
+      const inviteToken = ownerToken || collaboratorToken;
       const inviteUrl = buildOpenworkConnectInviteUrl({
         workspaceUrl: url,
-        token,
+        token: inviteToken,
       });
       return [
         {
@@ -670,7 +686,9 @@ export default function DashboardView(props: DashboardViewProps) {
           value: inviteUrl,
           secret: true,
           placeholder: !isTauriRuntime() ? "Desktop app required" : "Starting server...",
-          hint: "One link that prefills worker URL and token.",
+          hint: ownerToken
+            ? "One link that prefills the worker URL and owner token for permission prompts."
+            : "One link that prefills the worker URL and collaborator token.",
         },
         {
           label: "OpenWork worker URL",
@@ -683,13 +701,22 @@ export default function DashboardView(props: DashboardViewProps) {
               : undefined,
         },
         {
-          label: "Access token",
-          value: token,
+          label: "Owner token",
+          value: ownerToken,
           secret: true,
           placeholder: isTauriRuntime() ? "-" : "Desktop app required",
           hint: mountedUrl
             ? "Use on phones or laptops connecting to this worker."
-            : "Use on phones or laptops connecting to this host.",
+            : "Use on phones or laptops connecting to this host when the remote client must answer permission prompts.",
+        },
+        {
+          label: "Collaborator token",
+          value: collaboratorToken,
+          secret: true,
+          placeholder: isTauriRuntime() ? "-" : "Desktop app required",
+          hint: mountedUrl
+            ? "Routine remote access when you do not need owner-only actions."
+            : "Routine remote access to this host without owner-only actions.",
         },
       ];
     }
@@ -717,11 +744,11 @@ export default function DashboardView(props: DashboardViewProps) {
           value: url,
         },
         {
-          label: "Access token",
+          label: "Connected token",
           value: token,
           secret: true,
           placeholder: token ? undefined : "Set token in Advanced",
-          hint: "This token grants access to the worker on that host.",
+          hint: "This worker is currently connected with this token.",
         },
       ];
     }
@@ -758,7 +785,10 @@ export default function DashboardView(props: DashboardViewProps) {
     }
     if (ws.workspaceType !== "remote") {
       const baseUrl = props.openworkServerHostInfo?.baseUrl?.trim() ?? "";
-      const token = props.openworkServerHostInfo?.clientToken?.trim() ?? "";
+      const token =
+        props.openworkServerHostInfo?.ownerToken?.trim() ||
+        props.openworkServerHostInfo?.clientToken?.trim() ||
+        "";
       if (!baseUrl || !token) {
         return "Local OpenWork host is not ready yet.";
       }
@@ -783,7 +813,10 @@ export default function DashboardView(props: DashboardViewProps) {
 
     if (ws.workspaceType !== "remote") {
       const baseUrl = props.openworkServerHostInfo?.baseUrl?.trim() ?? "";
-      const token = props.openworkServerHostInfo?.clientToken?.trim() ?? "";
+      const token =
+        props.openworkServerHostInfo?.ownerToken?.trim() ||
+        props.openworkServerHostInfo?.clientToken?.trim() ||
+        "";
       if (!baseUrl || !token) {
         throw new Error("Local OpenWork host is not ready yet.");
       }
@@ -1035,8 +1068,15 @@ export default function DashboardView(props: DashboardViewProps) {
   };
 
   return (
-    <div class="flex h-screen w-full bg-dls-surface text-dls-text font-sans overflow-hidden">
-      <aside class="w-64 hidden md:flex flex-col bg-dls-sidebar border-r border-dls-border p-4">
+    <div class="h-[100dvh] min-h-screen w-full overflow-hidden bg-[var(--dls-app-bg)] p-3 md:p-4 text-dls-text font-sans">
+      <div class="flex h-full w-full gap-3 md:gap-4">
+      <aside
+        class="relative hidden md:flex shrink-0 flex-col rounded-[24px] border border-dls-border bg-dls-sidebar p-2.5"
+        style={{
+          width: `${leftSidebarWidth()}px`,
+          "min-width": `${leftSidebarWidth()}px`,
+        }}
+      >
         <div class="flex-1 overflow-y-auto">
           <Show when={showUpdatePill()}>
             <button
@@ -1073,13 +1113,11 @@ export default function DashboardView(props: DashboardViewProps) {
             workspaceConnectionStateById={props.workspaceConnectionStateById}
             newTaskDisabled={props.newTaskDisabled}
             importingWorkspaceConfig={props.importingWorkspaceConfig}
-            soulStatusByWorkspaceId={props.soulStatusByWorkspaceId}
             onActivateWorkspace={props.activateWorkspace}
             onOpenSession={openSessionFromList}
             onCreateTaskInWorkspace={createTaskInWorkspace}
             onOpenRenameWorkspace={props.openRenameWorkspace}
             onShareWorkspace={(workspaceId) => setShareWorkspaceId(workspaceId)}
-            onOpenSoul={openSoulForWorkspace}
             onRevealWorkspace={revealWorkspaceInFinder}
             onRecoverWorkspace={props.recoverWorkspace}
             onTestWorkspaceConnection={props.testWorkspaceConnection}
@@ -1090,13 +1128,19 @@ export default function DashboardView(props: DashboardViewProps) {
             onImportWorkspaceConfig={props.importWorkspaceConfig}
           />
         </div>
+        <div
+          class="absolute right-0 top-3 hidden h-[calc(100%-24px)] w-2 translate-x-1/2 cursor-col-resize rounded-full bg-transparent transition-colors hover:bg-gray-6/40 md:block"
+          onPointerDown={startLeftSidebarResize}
+          title="Resize workspace column"
+          aria-label="Resize workspace column"
+        />
 
       </aside>
 
-      <main class="flex-1 flex flex-col overflow-hidden bg-dls-surface">
+      <main class="min-w-0 flex-1 flex flex-col overflow-hidden rounded-[24px] border border-dls-border bg-dls-surface shadow-[var(--dls-shell-shadow)]">
         <div class="flex-1 overflow-y-auto">
-        <header class="h-14 flex items-center justify-between px-6 md:px-10 border-b border-dls-border sticky top-0 bg-dls-surface z-10">
-          <div class="flex items-center gap-3">
+        <header class="sticky top-0 z-10 flex h-12 items-center justify-between border-b border-dls-border bg-dls-surface px-4 md:px-6">
+          <div class="flex min-w-0 items-center gap-3">
             <Show when={showUpdatePill()}>
               <button
                 type="button"
@@ -1124,27 +1168,46 @@ export default function DashboardView(props: DashboardViewProps) {
                 </Show>
               </button>
             </Show>
-            <div class="px-3 py-1.5 rounded-xl bg-dls-hover text-xs text-dls-secondary font-medium">
+            <span class="shrink-0 rounded-md bg-dls-hover px-2 py-1 text-[11px] font-medium text-dls-secondary">
+              {props.activeWorkspaceDisplay.workspaceType === "remote" ? "Remote worker" : "Worker"}
+            </span>
+            <h1 class="truncate text-[15px] font-semibold text-dls-text">{title()}</h1>
+            <span class="hidden truncate text-[13px] text-dls-secondary lg:inline">
               {props.activeWorkspaceDisplay.name}
-            </div>
-            <Show when={props.activeSoulStatus?.enabled}>
-              <div class="inline-flex items-center gap-1 rounded-full border border-rose-7/40 bg-rose-3/40 px-2 py-1 text-[11px] text-rose-11">
-                <HeartPulse size={11} />
-                Soul on
-              </div>
-            </Show>
-            <h1 class="text-lg font-medium">{title()}</h1>
+            </span>
             <Show when={props.developerMode}>
-              <span class="text-xs text-dls-secondary">{props.headerStatus}</span>
+              <span class="hidden text-[12px] text-dls-secondary lg:inline">{props.headerStatus}</span>
             </Show>
             <Show when={props.busyHint}>
-              <span class="text-xs text-dls-secondary">{props.busyHint}</span>
+              <span class="hidden text-[12px] text-dls-secondary lg:inline">{props.busyHint}</span>
             </Show>
           </div>
-          <div class="flex items-center gap-2" />
+          <div class="flex items-center gap-1.5 text-gray-10">
+            <button
+              type="button"
+              class="hidden items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] font-medium text-gray-10 transition-colors hover:bg-gray-2/70 hover:text-dls-text sm:flex"
+              onClick={toggleRightSidebar}
+              title="Menu"
+              aria-label="Menu"
+            >
+              <Menu size={15} />
+              <span>Menu</span>
+              <span class="ml-1 rounded border border-dls-border px-1 text-[10px] text-gray-9">⌘K</span>
+            </button>
+            <div class="hidden h-4 w-px bg-dls-border sm:block" />
+            <button
+              type="button"
+              class="flex h-9 w-9 items-center justify-center rounded-md text-gray-10 transition-colors hover:bg-gray-2/70 hover:text-dls-text"
+              onClick={props.toggleSettings}
+              title="More"
+              aria-label="More"
+            >
+              <MoreHorizontal size={16} />
+            </button>
+          </div>
         </header>
 
-        <div class="p-6 md:p-10 max-w-5xl mx-auto space-y-10">
+        <div class="mx-auto w-full max-w-[1100px] space-y-10 p-6 md:p-10">
           <Switch>
             <Match when={props.tab === "scheduled"}>
               <ScheduledTasksView
@@ -1169,20 +1232,6 @@ export default function DashboardView(props: DashboardViewProps) {
                 canReloadWorkspace={props.canReloadWorkspace}
               />
             </Match>
-            <Match when={props.tab === "soul"}>
-              <SoulView
-                workspaceName={props.activeWorkspaceDisplay.name}
-                workspaceRoot={props.activeWorkspaceRoot}
-                status={props.activeSoulStatus}
-                heartbeats={props.activeSoulHeartbeats}
-                loading={props.soulStatusBusy}
-                loadingHeartbeats={props.soulHeartbeatsBusy}
-                error={props.soulError}
-                newTaskDisabled={props.newTaskDisabled}
-                refresh={props.refreshSoulData}
-                runSoulPrompt={props.runSoulPrompt}
-              />
-            </Match>
             <Match when={props.tab === "skills"}>
               <SkillsView
                 workspaceName={props.activeWorkspaceDisplay.name}
@@ -1196,9 +1245,14 @@ export default function DashboardView(props: DashboardViewProps) {
                 skillsStatus={props.skillsStatus}
                 hubSkills={props.hubSkills}
                 hubSkillsStatus={props.hubSkillsStatus}
+                hubRepo={props.hubRepo}
+                hubRepos={props.hubRepos}
                 importLocalSkill={props.importLocalSkill}
                 installSkillCreator={props.installSkillCreator}
                 installHubSkill={props.installHubSkill}
+                setHubRepo={props.setHubRepo}
+                addHubRepo={props.addHubRepo}
+                removeHubRepo={props.removeHubRepo}
                 revealSkillsFolder={props.revealSkillsFolder}
                 uninstallSkill={props.uninstallSkill}
                 readSkill={props.readSkill}
@@ -1214,6 +1268,7 @@ export default function DashboardView(props: DashboardViewProps) {
                 setDashboardTab={props.setTab}
                 busy={props.busy}
                 activeWorkspaceRoot={props.activeWorkspaceRoot}
+                isRemoteWorkspace={props.isRemoteWorkspace}
                 refreshMcpServers={props.refreshMcpServers}
                 mcpServers={props.mcpServers}
                 mcpStatus={props.mcpStatus}
@@ -1224,6 +1279,7 @@ export default function DashboardView(props: DashboardViewProps) {
                 setSelectedMcp={props.setSelectedMcp}
                 quickConnect={props.quickConnect}
                 connectMcp={props.connectMcp}
+                authorizeMcp={props.authorizeMcp}
                 logoutMcpAuth={props.logoutMcpAuth}
                 removeMcp={props.removeMcp}
                 showMcpReloadBanner={props.showMcpReloadBanner}
@@ -1295,12 +1351,14 @@ export default function DashboardView(props: DashboardViewProps) {
                   baseUrl={props.baseUrl}
                   headerStatus={props.headerStatus}
                   busy={props.busy}
+                  clientConnected={props.clientConnected}
                   settingsTab={props.settingsTab}
                   setSettingsTab={props.setSettingsTab}
                   providers={props.providers}
                   providerConnectedIds={props.providerConnectedIds}
                   providerAuthBusy={props.providerAuthBusy}
                   openProviderAuthModal={props.openProviderAuthModal}
+                  disconnectProvider={props.disconnectProvider}
                   openworkServerStatus={props.openworkServerStatus}
                   openworkServerUrl={props.openworkServerUrl}
                   openworkReconnectBusy={props.openworkReconnectBusy}
@@ -1309,6 +1367,7 @@ export default function DashboardView(props: DashboardViewProps) {
                   openworkServerCapabilities={props.openworkServerCapabilities}
                   openworkServerDiagnostics={props.openworkServerDiagnostics}
                   openworkServerWorkspaceId={props.openworkServerWorkspaceId}
+                  activeWorkspaceRoot={props.activeWorkspaceRoot}
                   openworkAuditEntries={props.openworkAuditEntries}
                   openworkAuditStatus={props.openworkAuditStatus}
                   openworkAuditError={props.openworkAuditError}
@@ -1360,6 +1419,8 @@ export default function DashboardView(props: DashboardViewProps) {
                   pendingPermissions={props.pendingPermissions}
                   events={props.events}
                   workspaceDebugEvents={props.workspaceDebugEvents}
+                  sandboxCreateProgress={props.sandboxCreateProgress}
+                  sandboxCreateProgressLast={props.sandboxCreateProgressLast}
                   clearWorkspaceDebugEvents={props.clearWorkspaceDebugEvents}
                   safeStringify={props.safeStringify}
                   repairOpencodeMigration={props.repairOpencodeMigration}
@@ -1373,11 +1434,13 @@ export default function DashboardView(props: DashboardViewProps) {
                   cleanupOpenworkDockerContainers={props.cleanupOpenworkDockerContainers}
                   dockerCleanupBusy={props.dockerCleanupBusy}
                   dockerCleanupResult={props.dockerCleanupResult}
+                  resetAppConfigDefaults={props.resetAppConfigDefaults}
                   notionStatus={props.notionStatus}
                   notionStatusDetail={props.notionStatusDetail}
                   notionError={props.notionError}
                   notionBusy={props.notionBusy}
                   connectNotion={props.connectNotion}
+                  openDebugShareLink={props.openDebugShareLink}
                 />
 
             </Match>
@@ -1428,6 +1491,7 @@ export default function DashboardView(props: DashboardViewProps) {
           onSelect={handleProviderAuthSelect}
           onSubmitApiKey={handleProviderAuthApiKey}
           onSubmitOAuth={handleProviderAuthOAuth}
+          onRefreshProviders={props.refreshProviders}
           onClose={props.closeProviderAuthModal}
         />
 
@@ -1445,6 +1509,10 @@ export default function DashboardView(props: DashboardViewProps) {
           shareWorkspaceProfileError={shareWorkspaceProfileError()}
           shareWorkspaceProfileDisabledReason={shareServiceDisabledReason()}
           onShareSkillsSet={publishSkillsSetLink}
+          onOpenSingleSkillShare={() => {
+            setShareWorkspaceId(null);
+            props.setTab("skills");
+          }}
           shareSkillsSetBusy={shareSkillsSetBusy()}
           shareSkillsSetUrl={shareSkillsSetUrl()}
           shareSkillsSetError={shareSkillsSetError()}
@@ -1466,17 +1534,18 @@ export default function DashboardView(props: DashboardViewProps) {
         <StatusBar
           clientConnected={props.clientConnected}
           openworkServerStatus={props.openworkServerStatus}
-          startupPreference={props.startupPreference}
           developerMode={props.developerMode}
-          onOpenSettings={() => openSettings("general")}
+          settingsOpen={props.tab === "settings"}
+          onSendFeedback={openFeedback}
+          onOpenSettings={props.toggleSettings}
           onOpenMessaging={openConfig}
           onOpenProviders={() => props.openProviderAuthModal()}
           onOpenMcp={() => props.setTab("mcp")}
           providerConnectedIds={props.providerConnectedIds}
           mcpStatuses={props.mcpStatuses}
         />
-        <nav class="md:hidden border-t border-dls-border bg-dls-surface">
-          <div class={`mx-auto max-w-5xl px-4 py-3 grid gap-2 ${props.developerMode ? "grid-cols-6" : "grid-cols-5"}`}>
+        <nav class="hidden border-t border-dls-border bg-dls-surface">
+          <div class={`mx-auto max-w-5xl px-4 py-3 grid gap-2 ${props.developerMode ? "grid-cols-5" : "grid-cols-4"}`}>
             <button
               class={`flex flex-col items-center gap-1 text-xs ${
                 props.tab === "scheduled" ? "text-gray-12" : "text-gray-10"
@@ -1485,15 +1554,6 @@ export default function DashboardView(props: DashboardViewProps) {
             >
               <History size={18} />
               Automations
-            </button>
-            <button
-              class={`flex flex-col items-center gap-1 text-xs ${
-                props.tab === "soul" ? "text-gray-12" : "text-gray-10"
-              }`}
-              onClick={() => props.setTab("soul")}
-            >
-              <HeartPulse size={18} class={soulNavIconClass()} />
-              Soul
             </button>
             <button
               class={`flex flex-col items-center gap-1 text-xs ${
@@ -1537,16 +1597,35 @@ export default function DashboardView(props: DashboardViewProps) {
         </nav>
       </main>
 
-      <aside class="w-56 hidden md:flex flex-col bg-dls-sidebar border-l border-dls-border p-4">
-        <div class="space-y-1 pt-2">
+      <aside
+        class="flex shrink-0 flex-col overflow-hidden rounded-[24px] border border-dls-border bg-dls-sidebar p-3 transition-[width] duration-200"
+        style={{
+          width: `${rightSidebarWidth()}px`,
+          "min-width": `${rightSidebarWidth()}px`,
+        }}
+      >
+        <div class={`flex items-center pb-3 ${rightSidebarExpanded() ? "justify-end" : "justify-center"}`}>
+          <button
+            type="button"
+            class="flex h-10 w-10 items-center justify-center rounded-[16px] text-dls-secondary transition-colors hover:bg-dls-surface hover:text-dls-text"
+            onClick={toggleRightSidebar}
+            title={rightSidebarExpanded() ? "Collapse sidebar" : "Expand sidebar"}
+            aria-label={rightSidebarExpanded() ? "Collapse sidebar" : "Expand sidebar"}
+          >
+            <Show when={rightSidebarExpanded()} fallback={<ChevronLeft size={18} />}>
+              <ChevronRight size={18} />
+            </Show>
+          </button>
+        </div>
+        <div class="space-y-1 pt-1">
           {navItem("scheduled", "自动化", <History size={18} />)}
-{navItem("soul", "灵魂", <HeartPulse size={18} class={soulNavIconClass()} />)}
-{navItem("skills", "技能", <Zap size={18} />)}
-{navItem("mcp", "扩展", <Box size={18} />)}
-{navItem("identities", "消息", <MessageCircle size={18} />)}
+          {navItem("skills", "技能", <Zap size={18} />)}
+          {navItem("mcp", "扩展", <Box size={18} />)}
+          {navItem("identities", "消息", <MessageCircle size={18} />)}
           <Show when={props.developerMode}>{navItem("config", "高级", <SlidersHorizontal size={18} />)}</Show>
         </div>
       </aside>
+      </div>
 
     </div>
   );

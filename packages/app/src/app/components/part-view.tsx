@@ -334,11 +334,15 @@ const applyTextHighlights = (root: HTMLElement, query: string) => {
 function useThrottledValue<T>(value: () => T, delayMs: number | (() => number) = 80) {
   const [state, setState] = createSignal<T>(value());
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let hasEmitted = false;
 
   createEffect(() => {
     const next = value();
     const delay = typeof delayMs === "function" ? delayMs() : delayMs;
-    if (!delay) {
+    // Always apply the first non-empty value synchronously so the initial
+    // render never falls through to the raw-text fallback.
+    if (!delay || !hasEmitted) {
+      hasEmitted = true;
       setState(() => next);
       return;
     }
@@ -357,7 +361,10 @@ function useThrottledValue<T>(value: () => T, delayMs: number | (() => number) =
 }
 
 const MARKDOWN_CACHE_MAX_ENTRIES = 100;
+const LARGE_TEXT_COLLAPSE_CHAR_THRESHOLD = 12_000;
+const LARGE_TEXT_PREVIEW_CHARS = 3_200;
 const markdownHtmlCache = new Map<string, string>();
+const expandedLargeTextPartIds = new Set<string>();
 const rendererByTone = new Map<"light" | "dark", ReturnType<typeof createCustomRenderer>>();
 
 function markdownCacheKey(tone: "light" | "dark", text: string) {
@@ -463,6 +470,8 @@ function createCustomRenderer(tone: "light" | "dark") {
         src="${safeHref}"
         alt="${escapeHtml(text || "")}"
         ${safeTitle ? `title="${safeTitle}"` : ""}
+        loading="lazy"
+        decoding="async"
         class="max-w-full h-auto rounded-lg my-4"
       />
     `;
@@ -479,6 +488,43 @@ export default function PartView(props: Props) {
   const showThinking = () => props.showThinking ?? true;
   const renderMarkdown = () => props.renderMarkdown ?? false;
   const markdownThrottleMs = () => Math.max(0, props.markdownThrottleMs ?? 100);
+  const textPartStableId = createMemo(() => {
+    if (p().type !== "text") return "";
+    const record = p() as { id?: string | number; messageID?: string | number };
+    const partId = record.id;
+    if (typeof partId === "string") return partId;
+    if (typeof partId === "number") return String(partId);
+    const messageId = record.messageID;
+    if (typeof messageId === "string") return `msg:${messageId}`;
+    if (typeof messageId === "number") return `msg:${String(messageId)}`;
+    return "";
+  });
+  const isPersistedExpanded = () => {
+    const id = textPartStableId();
+    return Boolean(id && expandedLargeTextPartIds.has(id));
+  };
+  const [expandedLongText, setExpandedLongText] = createSignal(isPersistedExpanded());
+  createEffect(() => {
+    if (!isPersistedExpanded()) return;
+    if (expandedLongText()) return;
+    setExpandedLongText(true);
+  });
+  const rawText = createMemo(() => {
+    if (p().type !== "text") return "";
+    return "text" in p() ? String((p() as { text: string }).text ?? "") : "";
+  });
+  const shouldCollapseLongText = createMemo(
+    () => renderMarkdown() && p().type === "text" && rawText().length >= LARGE_TEXT_COLLAPSE_CHAR_THRESHOLD,
+  );
+  const collapsedLongText = createMemo(
+    () => shouldCollapseLongText() && !(expandedLongText() || isPersistedExpanded()),
+  );
+  const collapsedPreviewText = createMemo(() => {
+    const text = rawText();
+    if (!collapsedLongText()) return text;
+    if (text.length <= LARGE_TEXT_PREVIEW_CHARS) return text;
+    return `${text.slice(0, LARGE_TEXT_PREVIEW_CHARS)}\n\n...`;
+  });
   let textContainerEl: HTMLDivElement | undefined;
   const fileInfo = () => {
     if (p().type !== "file") return null;
@@ -526,11 +572,13 @@ export default function PartView(props: Props) {
   const showToolOutput = () => developerMode();
   const markdownSource = createMemo(() => {
     if (!renderMarkdown() || p().type !== "text") return "";
-    return "text" in p() ? String((p() as { text: string }).text ?? "") : "";
+    if (collapsedLongText()) return "";
+    return rawText();
   });
   const throttledMarkdownSource = useThrottledValue(markdownSource, markdownThrottleMs);
   const renderedMarkdown = createMemo(() => {
     if (!renderMarkdown() || p().type !== "text") return null;
+    if (collapsedLongText()) return null;
     const text = throttledMarkdownSource();
     if (!text.trim()) return "";
 
@@ -560,6 +608,11 @@ export default function PartView(props: Props) {
       }
 
       const html = typeof result === "string" ? result : "";
+      // If marked returned empty HTML for non-empty source, treat as a parse
+      // failure so the fallback renders plain text instead of blank space.
+      if (!html && text.trim()) {
+        return null;
+      }
       writeMarkdownCache(cacheKey, html);
       return html;
     } catch (error) {
@@ -809,8 +862,33 @@ export default function PartView(props: Props) {
   return (
     <Switch>
       <Match when={p().type === "text"}>
+        <Show when={collapsedLongText()}>
+          <div class="rounded-xl border border-gray-6/70 bg-gray-2/30 p-4 space-y-3">
+            <div
+              ref={(el) => {
+                textContainerEl = el;
+              }}
+              class={`whitespace-pre-wrap break-words text-[14px] leading-relaxed max-h-[22rem] overflow-hidden ${textClass()}`.trim()}
+            >
+              {collapsedPreviewText()}
+            </div>
+              <button
+                type="button"
+                class="rounded-md border border-gray-6/80 bg-gray-1 px-3 py-1.5 text-xs font-medium text-gray-11 hover:bg-gray-2 hover:text-gray-12"
+                onClick={() => {
+                  const id = textPartStableId();
+                  if (id) {
+                    expandedLargeTextPartIds.add(id);
+                  }
+                  setExpandedLongText(true);
+                }}
+              >
+                Show full message ({rawText().length.toLocaleString()} chars)
+              </button>
+          </div>
+        </Show>
         <Show
-          when={renderMarkdown()}
+          when={renderMarkdown() && !collapsedLongText()}
           fallback={
             <div
               ref={(el) => {
@@ -822,24 +900,21 @@ export default function PartView(props: Props) {
             </div>
           }
         >
-          <Show
-            when={renderedMarkdown()}
-            fallback={
-              <div
-                ref={(el) => {
-                  textContainerEl = el;
-                }}
-                class={`whitespace-pre-wrap break-words ${textClass()}`.trim()}
-              >
-                {renderTextWithLinks()}
-              </div>
-            }
-          >
+          {/* null = parse error → plain text; "" = empty/pending → nothing; string = rendered HTML */}
+          <Show when={renderedMarkdown() === null}>
             <div
-              ref={(el) => {
-                textContainerEl = el;
-              }}
+              ref={(el) => { textContainerEl = el; }}
+              class={`whitespace-pre-wrap break-words ${textClass()}`.trim()}
+            >
+              {renderTextWithLinks()}
+            </div>
+          </Show>
+          <Show when={typeof renderedMarkdown() === "string" && renderedMarkdown()}>
+            <div
+              ref={(el) => { textContainerEl = el; }}
               class={`markdown-content max-w-none ${textClass()}
+                [&_strong]:font-semibold
+                [&_em]:italic
                 [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:my-4
                 [&_h2]:text-xl [&_h2]:font-bold [&_h2]:my-3
                 [&_h3]:text-lg [&_h3]:font-bold [&_h3]:my-2
@@ -998,6 +1073,8 @@ export default function PartView(props: Props) {
                     <img
                       src={image.src}
                       alt={image.alt || ""}
+                      loading="lazy"
+                      decoding="async"
                       class="max-w-full h-auto rounded-lg border border-gray-6/50"
                     />
                   )}
@@ -1053,6 +1130,8 @@ export default function PartView(props: Props) {
         <img
           src={inlineImage()!}
           alt=""
+          loading="lazy"
+          decoding="async"
           class="max-w-full h-auto rounded-xl border border-gray-6/50"
         />
       </Match>

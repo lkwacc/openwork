@@ -50,6 +50,38 @@ export type OpenworkServerDiagnostics = {
   tokenSource: { client: string; host: string };
 };
 
+export type OpenworkRuntimeServiceName = "openwork-server" | "opencode" | "opencode-router";
+
+export type OpenworkRuntimeServiceSnapshot = {
+  name: OpenworkRuntimeServiceName;
+  enabled: boolean;
+  running: boolean;
+  targetVersion: string | null;
+  actualVersion: string | null;
+  upgradeAvailable: boolean;
+};
+
+export type OpenworkRuntimeSnapshot = {
+  ok: boolean;
+  orchestrator?: {
+    version: string;
+    startedAt: number;
+  };
+  worker?: {
+    workspace: string;
+    sandboxMode: string;
+  };
+  upgrade?: {
+    status: "idle" | "running" | "failed";
+    startedAt: number | null;
+    finishedAt: number | null;
+    error: string | null;
+    operationId: string | null;
+    services: OpenworkRuntimeServiceName[];
+  };
+  services: OpenworkRuntimeServiceSnapshot[];
+};
+
 export type OpenworkServerSettings = {
   urlOverride?: string;
   portOverride?: number;
@@ -125,6 +157,12 @@ export type OpenworkHubSkillItem = {
     ref: string;
     path: string;
   };
+};
+
+export type OpenworkHubRepo = {
+  owner?: string;
+  repo?: string;
+  ref?: string;
 };
 
 export type OpenworkWorkspaceFileContent = {
@@ -467,40 +505,6 @@ export type OpenworkInboxUploadResult = {
   ok: boolean;
   path: string;
   bytes: number;
-};
-
-export type OpenworkSoulHeartbeatEntry = {
-  id: string;
-  ts: string | null;
-  workspace: string | null;
-  summary: string;
-  looseEnds: string[];
-  nextAction: string | null;
-};
-
-export type OpenworkSoulStatus = {
-  enabled: boolean;
-  state: "off" | "healthy" | "stale" | "error";
-  memoryEnabled: boolean;
-  instructionsEnabled: boolean;
-  heartbeatLogExists: boolean;
-  heartbeatCommandExists: boolean;
-  heartbeatJob: {
-    name: string;
-    slug: string;
-    schedule: string;
-    lastRunAt: string | null;
-    lastRunStatus: string | null;
-    lastRunError: string | null;
-  } | null;
-  heartbeatCount: number;
-  lastHeartbeatAt: string | null;
-  lastHeartbeatSummary: string | null;
-  staleAfterMs: number | null;
-  overdue: boolean;
-  summary: string;
-  memoryPath: string;
-  heartbeatPath: string;
 };
 
 type RawJsonResponse<T> = {
@@ -1193,6 +1197,8 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
     token,
     health: () =>
       requestJson<{ ok: boolean; version: string; uptimeMs: number }>(baseUrl, "/health", { token, hostToken, timeoutMs: timeouts.health }),
+    runtimeVersions: () =>
+      requestJson<OpenworkRuntimeSnapshot>(baseUrl, "/runtime/versions", { token, hostToken, timeoutMs: timeouts.status }),
     status: () => requestJson<OpenworkServerDiagnostics>(baseUrl, "/status", { token, hostToken, timeoutMs: timeouts.status }),
     capabilities: () => requestJson<OpenworkServerCapabilities>(baseUrl, "/capabilities", { token, hostToken, timeoutMs: timeouts.capabilities }),
     validateInviteCode: (code: string, options?: { consume?: boolean; clientId?: string }) =>
@@ -1537,11 +1543,20 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
         { token, hostToken },
       );
     },
-    listHubSkills: () =>
-      requestJson<{ items: OpenworkHubSkillItem[] }>(baseUrl, `/hub/skills`, {
+    listHubSkills: (options?: { repo?: OpenworkHubRepo }) => {
+      const params = new URLSearchParams();
+      const owner = options?.repo?.owner?.trim();
+      const repo = options?.repo?.repo?.trim();
+      const ref = options?.repo?.ref?.trim();
+      if (owner) params.set("owner", owner);
+      if (repo) params.set("repo", repo);
+      if (ref) params.set("ref", ref);
+      const query = params.size ? `?${params.toString()}` : "";
+      return requestJson<{ items: OpenworkHubSkillItem[] }>(baseUrl, `/hub/skills${query}`, {
         token,
         hostToken,
-      }),
+      });
+    },
     installHubSkill: (
       workspaceId: string,
       name: string,
@@ -1635,17 +1650,6 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
           hostToken,
           method: "DELETE",
         },
-      ),
-    getSoulStatus: (workspaceId: string) =>
-      requestJson<OpenworkSoulStatus>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/soul/status`, {
-        token,
-        hostToken,
-      }),
-    listSoulHeartbeats: (workspaceId: string, limit = 20) =>
-      requestJson<{ items: OpenworkSoulHeartbeatEntry[]; total: number; path: string }>(
-        baseUrl,
-        `/workspace/${encodeURIComponent(workspaceId)}/soul/heartbeats?limit=${encodeURIComponent(String(limit))}`,
-        { token, hostToken },
       ),
 
     uploadInbox: async (workspaceId: string, file: File, options?: { path?: string }) => {

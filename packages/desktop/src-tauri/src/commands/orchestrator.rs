@@ -1,12 +1,13 @@
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::env;
 use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
@@ -27,6 +28,7 @@ const SANDBOX_PROGRESS_EVENT: &str = "openwork://sandbox-create-progress";
 pub struct OrchestratorDetachedHost {
     pub openwork_url: String,
     pub token: String,
+    pub owner_token: Option<String>,
     pub host_token: String,
     pub port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,6 +91,38 @@ pub struct OpenworkDockerCleanupResult {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxDebugProbeCleanup {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_name: Option<String>,
+    pub container_removed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_result: Option<SandboxDoctorCommandDebug>,
+    pub workspace_removed: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxDebugProbeResult {
+    pub started_at: u64,
+    pub finished_at: u64,
+    pub run_id: String,
+    pub workspace_path: String,
+    pub ready: bool,
+    pub doctor: SandboxDoctorResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached_host: Option<OrchestratorDetachedHost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_inspect: Option<SandboxDoctorCommandDebug>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_logs: Option<SandboxDoctorCommandDebug>,
+    pub cleanup: SandboxDebugProbeCleanup,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 fn run_local_command(program: &str, args: &[&str]) -> Result<(i32, String, String), String> {
     let mut command = Command::new(program);
     configure_hidden(&mut command);
@@ -100,6 +134,28 @@ fn run_local_command(program: &str, args: &[&str]) -> Result<(i32, String, Strin
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     Ok((status, stdout, stderr))
+}
+
+/// Maximum time to wait for pipe reader threads to complete after child termination.
+/// This bounds the join operation to prevent indefinite blocking.
+const READER_JOIN_TIMEOUT_MS: u64 = 2000;
+
+fn recv_pipe_bytes(label: &str, rx: &mpsc::Receiver<Vec<u8>>, deadline: Instant) -> Vec<u8> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match rx.recv_timeout(remaining) {
+        Ok(bytes) => bytes,
+        Err(RecvTimeoutError::Timeout) => {
+            eprintln!(
+                "[timeout-helper] {label} reader timed out after {}ms",
+                remaining.as_millis()
+            );
+            Vec::new()
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            eprintln!("[timeout-helper] {label} reader disconnected");
+            Vec::new()
+        }
+    }
 }
 
 fn run_local_command_with_timeout(
@@ -119,12 +175,17 @@ fn run_local_command_with_timeout(
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
 
+    // Use channels to collect output with bounded wait on join.
+    // This prevents indefinite blocking if pipe readers don't complete.
+    let (stdout_tx, stdout_rx) = mpsc::channel();
+    let (stderr_tx, stderr_rx) = mpsc::channel();
+
     let stdout_handle = std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(mut reader) = stdout_pipe.take() {
             let _ = reader.read_to_end(&mut buf);
         }
-        buf
+        let _ = stdout_tx.send(buf);
     });
 
     let stderr_handle = std::thread::spawn(move || {
@@ -132,13 +193,14 @@ fn run_local_command_with_timeout(
         if let Some(mut reader) = stderr_pipe.take() {
             let _ = reader.read_to_end(&mut buf);
         }
-        buf
+        let _ = stderr_tx.send(buf);
     });
 
     let poll = Duration::from_millis(25);
     let start = Instant::now();
     let mut timed_out = false;
     let mut exit_status: Option<std::process::ExitStatus> = None;
+    let join_timeout = Duration::from_millis(READER_JOIN_TIMEOUT_MS);
 
     loop {
         match child.try_wait() {
@@ -149,6 +211,10 @@ fn run_local_command_with_timeout(
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     timed_out = true;
+                    eprintln!(
+                        "[timeout-helper] Killing {program} after {}ms timeout",
+                        timeout.as_millis()
+                    );
                     let _ = child.kill();
                     let _ = child.wait();
                     break;
@@ -156,10 +222,12 @@ fn run_local_command_with_timeout(
                 std::thread::sleep(poll);
             }
             Err(err) => {
+                eprintln!("[timeout-helper] Error waiting for {program}: {err}");
                 let _ = child.kill();
                 let _ = child.wait();
-                let stdout_bytes = stdout_handle.join().unwrap_or_default();
-                let stderr_bytes = stderr_handle.join().unwrap_or_default();
+                let join_deadline = Instant::now() + join_timeout;
+                let stdout_bytes = recv_pipe_bytes("stdout", &stdout_rx, join_deadline);
+                let stderr_bytes = recv_pipe_bytes("stderr", &stderr_rx, join_deadline);
                 let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
                 let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
                 return Err(format!(
@@ -171,13 +239,26 @@ fn run_local_command_with_timeout(
         }
     }
 
-    let stdout_bytes = stdout_handle.join().unwrap_or_default();
-    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+    // Wait for reader threads with bounded timeout.
+    // This prevents indefinite blocking in edge cases where pipe readers stall.
+    let join_deadline = Instant::now() + join_timeout;
+    let stdout_bytes = recv_pipe_bytes("stdout", &stdout_rx, join_deadline);
+    let stderr_bytes = recv_pipe_bytes("stderr", &stderr_rx, join_deadline);
+
+    // Detach the thread handles (they will finish or be leaked, but won't block us)
+    drop(stdout_handle);
+    drop(stderr_handle);
+
     let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
     let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
 
     if timed_out {
         let arg_list = args.join(" ");
+        eprintln!(
+            "[timeout-helper] Command timed out: {program} {arg_list} (stdout: {} bytes, stderr: {} bytes)",
+            stdout.len(),
+            stderr.len()
+        );
         return Err(format!(
             "Timed out after {}ms running {program} {arg_list}",
             timeout.as_millis()
@@ -364,6 +445,23 @@ fn truncate_for_debug(input: &str) -> String {
         return trimmed.to_string();
     }
     format!("{}...[truncated]", &trimmed[..MAX_LEN])
+}
+
+fn truncate_for_report(input: &str) -> String {
+    const MAX_LEN: usize = 48_000;
+    let trimmed = input.trim();
+    if trimmed.len() <= MAX_LEN {
+        return trimmed.to_string();
+    }
+    format!("{}...[truncated]", &trimmed[..MAX_LEN])
+}
+
+fn to_command_debug(result: DockerCommandResult) -> SandboxDoctorCommandDebug {
+    SandboxDoctorCommandDebug {
+        status: result.status,
+        stdout: truncate_for_report(&result.stdout),
+        stderr: truncate_for_report(&result.stderr),
+    }
 }
 
 fn derive_orchestrator_container_name(run_id: &str) -> String {
@@ -611,6 +709,50 @@ pub fn orchestrator_instance_dispose(
     Ok(result.disposed)
 }
 
+fn format_sandbox_start_timeout_error(
+    elapsed_ms: u64,
+    openwork_url: &str,
+    last_error: Option<&str>,
+    container_state: Option<&str>,
+    container_probe_error: Option<&str>,
+) -> String {
+    let mut details = vec![
+        format!("stage=openwork.healthcheck"),
+        format!("elapsed_ms={elapsed_ms}"),
+        format!("url={openwork_url}"),
+        format!("last_error={}", last_error.unwrap_or("none")),
+        format!("container_state={}", container_state.unwrap_or("unknown")),
+    ];
+
+    if let Some(probe_error) = container_probe_error {
+        details.push(format!("container_probe_error={probe_error}"));
+    }
+
+    format!(
+        "Timed out waiting for OpenWork server ({})",
+        details.join(", ")
+    )
+}
+
+fn issue_owner_token(openwork_url: &str, host_token: &str) -> Result<String, String> {
+    let response = ureq::post(&format!("{}/tokens", openwork_url.trim_end_matches('/')))
+        .set("X-OpenWork-Host-Token", host_token)
+        .set("Content-Type", "application/json")
+        .send_string(r#"{"scope":"owner","label":"OpenWork detached owner token"}"#)
+        .map_err(|err| err.to_string())?;
+
+    let payload: Value = response
+        .into_json()
+        .map_err(|err| format!("Failed to parse owner token response: {err}"))?;
+
+    payload
+        .get("token")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "OpenWork server did not return an owner token".to_string())
+}
+
 #[tauri::command]
 pub fn orchestrator_start_detached(
     app: AppHandle,
@@ -678,6 +820,7 @@ pub fn orchestrator_start_detached(
             .into_iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect::<Vec<_>>();
+        let resolved = candidates.first().cloned();
         emit_sandbox_progress(
             &app,
             &sandbox_run_id,
@@ -685,6 +828,7 @@ pub fn orchestrator_start_detached(
             "Inspecting Docker configuration...",
             json!({
                 "candidates": candidates,
+                "resolvedDockerBin": resolved,
                 "openworkDockerBin": env::var("OPENWORK_DOCKER_BIN").ok(),
                 "openwrkDockerBin": env::var("OPENWRK_DOCKER_BIN").ok(),
                 "dockerBin": env::var("DOCKER_BIN").ok(),
@@ -692,9 +836,9 @@ pub fn orchestrator_start_detached(
         );
     }
 
-    let command = match app.shell().sidecar("openwork-orchestrator") {
-        Ok(command) => command,
-        Err(_) => app.shell().command("openwork"),
+    let (command, command_label) = match app.shell().sidecar("openwork-orchestrator") {
+        Ok(command) => (command, "sidecar:openwork-orchestrator".to_string()),
+        Err(_) => (app.shell().command("openwork"), "path:openwork".to_string()),
     };
 
     // Start a dedicated host stack for this workspace.
@@ -733,10 +877,36 @@ pub fn orchestrator_start_detached(
             str_args.push(arg.as_str());
         }
 
-        command
-            .args(str_args)
-            .spawn()
-            .map_err(|e| format!("Failed to start openwork orchestrator: {e}"))?;
+        emit_sandbox_progress(
+            &app,
+            &sandbox_run_id,
+            "spawn.config",
+            "Launching sandbox host...",
+            json!({
+                "command": command_label,
+                "args": args,
+                "env": {
+                    "PATH": env::var("PATH").ok(),
+                    "OPENWORK_DOCKER_BIN": env::var("OPENWORK_DOCKER_BIN").ok(),
+                    "OPENWRK_DOCKER_BIN": env::var("OPENWRK_DOCKER_BIN").ok(),
+                    "DOCKER_BIN": env::var("DOCKER_BIN").ok(),
+                }
+            }),
+        );
+
+        if let Err(err) = command.args(str_args).spawn() {
+            emit_sandbox_progress(
+                &app,
+                &sandbox_run_id,
+                "spawn.error",
+                "Failed to launch sandbox host.",
+                json!({
+                    "error": err.to_string(),
+                    "command": command_label,
+                }),
+            );
+            return Err(format!("Failed to start openwork orchestrator: {err}"));
+        }
         eprintln!(
             "[sandbox-create][at={}][runId={}][stage=spawn] launched openwork sidecar for detached sandbox host",
             now_ms(),
@@ -857,8 +1027,14 @@ pub fn orchestrator_start_detached(
     }
 
     if start.elapsed() >= Duration::from_millis(health_timeout_ms) {
-        let message =
-            last_error.unwrap_or_else(|| "Timed out waiting for OpenWork server".to_string());
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        let message = format_sandbox_start_timeout_error(
+            elapsed_ms,
+            &openwork_url,
+            last_error.as_deref(),
+            last_container_state.as_deref(),
+            last_container_probe_error.as_deref(),
+        );
         emit_sandbox_progress(
             &app,
             &sandbox_run_id,
@@ -866,7 +1042,7 @@ pub fn orchestrator_start_detached(
             "Sandbox failed to start.",
             json!({
                 "error": message,
-                "elapsedMs": start.elapsed().as_millis() as u64,
+                "elapsedMs": elapsed_ms,
                 "openworkUrl": openwork_url,
                 "containerState": last_container_state,
                 "containerProbeError": last_container_probe_error,
@@ -876,7 +1052,7 @@ pub fn orchestrator_start_detached(
             "[sandbox-create][at={}][runId={}][stage=timeout] health wait timed out after {}ms error={}",
             now_ms(),
             sandbox_run_id,
-            start.elapsed().as_millis(),
+            elapsed_ms,
             message
         );
         return Err(message);
@@ -890,9 +1066,12 @@ pub fn orchestrator_start_detached(
         openwork_url
     );
 
+    let owner_token = issue_owner_token(&openwork_url, &host_token).ok();
+
     Ok(OrchestratorDetachedHost {
         openwork_url,
         token,
+        owner_token,
         host_token,
         port,
         sandbox_backend: if wants_docker_sandbox {
@@ -1150,6 +1329,159 @@ pub fn sandbox_cleanup_openwork_containers() -> Result<OpenworkDockerCleanupResu
     })
 }
 
+#[tauri::command]
+pub fn sandbox_debug_probe(app: AppHandle) -> SandboxDebugProbeResult {
+    let started_at = now_ms();
+    let run_id = format!("probe-{}", Uuid::new_v4());
+    let workspace_dir = env::temp_dir().join(format!("openwork-sandbox-probe-{}", Uuid::new_v4()));
+    let workspace_path = workspace_dir.to_string_lossy().to_string();
+
+    let mut cleanup_errors: Vec<String> = Vec::new();
+    let mut workspace_removed = false;
+
+    if let Err(err) = std::fs::create_dir_all(&workspace_dir) {
+        return SandboxDebugProbeResult {
+            started_at,
+            finished_at: now_ms(),
+            run_id,
+            workspace_path,
+            ready: false,
+            doctor: sandbox_doctor(),
+            detached_host: None,
+            docker_inspect: None,
+            docker_logs: None,
+            cleanup: SandboxDebugProbeCleanup {
+                container_name: None,
+                container_removed: false,
+                remove_result: None,
+                workspace_removed,
+                errors: vec![format!("Failed to create probe workspace: {err}")],
+            },
+            error: Some(format!("Failed to create sandbox probe workspace: {err}")),
+        };
+    }
+
+    let doctor = sandbox_doctor();
+    let mut detached_host: Option<OrchestratorDetachedHost> = None;
+    let mut docker_inspect: Option<SandboxDoctorCommandDebug> = None;
+    let mut docker_logs: Option<SandboxDoctorCommandDebug> = None;
+    let mut error: Option<String> = None;
+
+    if doctor.ready {
+        match orchestrator_start_detached(
+            app,
+            workspace_path.clone(),
+            Some("docker".to_string()),
+            Some(run_id.clone()),
+            None,
+            None,
+        ) {
+            Ok(host) => {
+                let container_name = host
+                    .sandbox_container_name
+                    .clone()
+                    .unwrap_or_else(|| derive_orchestrator_container_name(&run_id));
+
+                match run_docker_command_detailed(
+                    &["inspect", container_name.as_str()],
+                    Duration::from_secs(6),
+                ) {
+                    Ok(result) => {
+                        docker_inspect = Some(to_command_debug(result));
+                    }
+                    Err(err) => {
+                        cleanup_errors.push(format!("docker inspect failed: {err}"));
+                    }
+                }
+
+                match run_docker_command_detailed(
+                    &[
+                        "logs",
+                        "--timestamps",
+                        "--tail",
+                        "400",
+                        container_name.as_str(),
+                    ],
+                    Duration::from_secs(8),
+                ) {
+                    Ok(result) => {
+                        docker_logs = Some(to_command_debug(result));
+                    }
+                    Err(err) => {
+                        cleanup_errors.push(format!("docker logs failed: {err}"));
+                    }
+                }
+
+                detached_host = Some(host);
+            }
+            Err(err) => {
+                error = Some(format!("Sandbox probe failed to start: {err}"));
+            }
+        }
+    } else {
+        error = Some(
+            doctor
+                .error
+                .as_deref()
+                .unwrap_or("Docker is not ready for sandbox creation")
+                .to_string(),
+        );
+    }
+
+    let container_name = detached_host
+        .as_ref()
+        .and_then(|host| host.sandbox_container_name.clone())
+        .or_else(|| {
+            if doctor.ready {
+                Some(derive_orchestrator_container_name(&run_id))
+            } else {
+                None
+            }
+        });
+
+    let mut container_removed = false;
+    let mut remove_result: Option<SandboxDoctorCommandDebug> = None;
+
+    if let Some(name) = container_name.clone() {
+        match run_docker_command_detailed(&["rm", "-f", name.as_str()], Duration::from_secs(20)) {
+            Ok(result) => {
+                container_removed = result.status == 0;
+                remove_result = Some(to_command_debug(result));
+            }
+            Err(err) => {
+                cleanup_errors.push(format!("docker rm -f {name} failed: {err}"));
+            }
+        }
+    }
+
+    if let Err(err) = std::fs::remove_dir_all(&workspace_dir) {
+        cleanup_errors.push(format!("Failed to remove probe workspace: {err}"));
+    } else {
+        workspace_removed = true;
+    }
+
+    let ready = doctor.ready && error.is_none();
+    SandboxDebugProbeResult {
+        started_at,
+        finished_at: now_ms(),
+        run_id,
+        workspace_path,
+        ready,
+        doctor,
+        detached_host,
+        docker_inspect,
+        docker_logs,
+        cleanup: SandboxDebugProbeCleanup {
+            container_name,
+            container_removed,
+            remove_result,
+            workspace_removed,
+            errors: cleanup_errors,
+        },
+        error,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1242,6 +1574,63 @@ exit 0
         assert!(stdout.contains("Docker version 0.0.0"));
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_command_timeout_returns_when_descendant_keeps_pipe_open() {
+        let tmp =
+            std::env::temp_dir().join(format!("openwork-timeout-pipe-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&tmp).expect("create tmp dir");
+
+        let pid_file = tmp.join("descendant.pid");
+        let sticky = tmp.join("sticky-command");
+        write_executable(
+            &sticky,
+            &format!(
+                "#!/bin/sh\nsleep 20 &\necho $! > \"{}\"\nexec /bin/sleep 20\n",
+                pid_file.display()
+            ),
+        );
+
+        let start = Instant::now();
+        let result = run_local_command_with_timeout(
+            sticky.to_str().expect("sticky-command path"),
+            &["--version"],
+            Duration::from_millis(300),
+        );
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        assert!(
+            elapsed < Duration::from_millis(3_500),
+            "expected bounded timeout, got {elapsed:?}"
+        );
+
+        if let Ok(pid) = fs::read_to_string(&pid_file) {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", pid.trim()])
+                .status();
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sandbox_start_timeout_error_includes_stage_diagnostics() {
+        let message = format_sandbox_start_timeout_error(
+            90_000,
+            "http://127.0.0.1:43210",
+            Some("Connection refused (os error 61)"),
+            Some("created"),
+            Some("No such container"),
+        );
+
+        assert!(message.contains("stage=openwork.healthcheck"));
+        assert!(message.contains("elapsed_ms=90000"));
+        assert!(message.contains("url=http://127.0.0.1:43210"));
+        assert!(message.contains("last_error=Connection refused (os error 61)"));
+        assert!(message.contains("container_state=created"));
+        assert!(message.contains("container_probe_error=No such container"));
     }
 
     #[test]

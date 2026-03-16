@@ -26,6 +26,7 @@ export type OpenworkServerInfo = {
   mdnsUrl: string | null;
   lanUrl: string | null;
   clientToken: string | null;
+  ownerToken: string | null;
   hostToken: string | null;
   pid: number | null;
   lastStdout: string | null;
@@ -387,15 +388,21 @@ export type AppBuildInfo = {
   version: string;
   gitSha?: string | null;
   buildEpoch?: string | null;
+  openworkDevMode?: boolean;
 };
 
 export async function appBuildInfo(): Promise<AppBuildInfo> {
   return invoke<AppBuildInfo>("app_build_info");
 }
 
+export async function nukeOpencodeDevConfigAndExit(): Promise<void> {
+  return invoke<void>("nuke_opencode_dev_config_and_exit");
+}
+
 export type OrchestratorDetachedHost = {
   openworkUrl: string;
   token: string;
+  ownerToken?: string | null;
   hostToken: string;
   port: number;
   sandboxBackend?: "docker" | null;
@@ -459,6 +466,42 @@ export type OpenworkDockerCleanupResult = {
 
 export async function sandboxCleanupOpenworkContainers(): Promise<OpenworkDockerCleanupResult> {
   return invoke<OpenworkDockerCleanupResult>("sandbox_cleanup_openwork_containers");
+}
+
+export type SandboxDebugProbeResult = {
+  startedAt: number;
+  finishedAt: number;
+  runId: string;
+  workspacePath: string;
+  ready: boolean;
+  doctor: SandboxDoctorResult;
+  detachedHost?: OrchestratorDetachedHost | null;
+  dockerInspect?: {
+    status: number;
+    stdout: string;
+    stderr: string;
+  } | null;
+  dockerLogs?: {
+    status: number;
+    stdout: string;
+    stderr: string;
+  } | null;
+  cleanup: {
+    containerName?: string | null;
+    containerRemoved: boolean;
+    removeResult?: {
+      status: number;
+      stdout: string;
+      stderr: string;
+    } | null;
+    workspaceRemoved: boolean;
+    errors: string[];
+  };
+  error?: string | null;
+};
+
+export async function sandboxDebugProbe(): Promise<SandboxDebugProbeResult> {
+  return invoke<SandboxDebugProbeResult>("sandbox_debug_probe");
 }
 
 export async function openworkServerInfo(): Promise<OpenworkServerInfo> {

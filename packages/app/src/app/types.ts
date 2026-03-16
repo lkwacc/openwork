@@ -17,6 +17,7 @@ export type SidebarSessionItem = {
   id: string;
   title: string;
   slug?: string | null;
+  parentID?: string | null;
   time?: {
     updated?: number | null;
     created?: number | null;
@@ -67,6 +68,15 @@ export type MessageWithParts = {
   parts: Part[];
 };
 
+export type SessionErrorTurn = {
+  id: string;
+  text: string;
+  afterMessageID: string | null;
+  time: number;
+};
+
+export const SYNTHETIC_SESSION_ERROR_MESSAGE_PREFIX = "session-error:";
+
 export type StepGroupMode = "exploration" | "standalone";
 
 export type MessageGroup =
@@ -87,7 +97,8 @@ export type ComposerAttachment = {
   mimeType: string;
   size: number;
   kind: "image" | "file";
-  dataUrl: string;
+  file: File;
+  previewUrl?: string;
 };
 
 export type SlashCommandOption = {
@@ -137,7 +148,6 @@ export type OnboardingStep = "welcome" | "local" | "server" | "connecting";
 
 export type DashboardTab =
   | "scheduled"
-  | "soul"
   | "skills"
   | "plugins"
   | "mcp"
@@ -180,14 +190,17 @@ export type SkillCard = {
   trigger?: string;
 };
 
+export type HubSkillRepo = {
+  owner: string;
+  repo: string;
+  ref: string;
+};
+
 export type HubSkillCard = {
   name: string;
   description?: string;
   trigger?: string;
-  source: {
-    owner: string;
-    repo: string;
-    ref: string;
+  source: HubSkillRepo & {
     path: string;
   };
 };

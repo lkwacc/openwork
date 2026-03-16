@@ -1,5 +1,7 @@
 [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/VEhNQXxYMB)
 
+English | [简体中文](./README_ZH.md) | [繁體中文](./README_ZH_hk.md)
+
 # OpenWork
 
 > OpenWork helps you run your agents, skills, and MCP. It's an open-source alternative to Claude Cowork/Codex (desktop app).
@@ -18,11 +20,6 @@
 OpenWork is designed around the idea that you can easily ship your agentic workflows as a repeatable, productized process.
 
 ## Alternate UIs
-
-- **OpenCode Router (WhatsApp bot)**: a lightweight WhatsApp bridge for a running OpenCode server. Install with:
-  - `curl -fsSL https://raw.githubusercontent.com/different-ai/opencode-router/dev/install.sh | bash`
-  - run `opencode-router setup`, then `opencode-router whatsapp login`, then `opencode-router start`
-  - full setup: https://github.com/different-ai/opencode-router/blob/dev/README.md
 - **OpenWork Orchestrator (CLI host)**: run OpenCode + OpenWork server without the desktop UI.
   - install: `npm install -g openwork-orchestrator`
   - run: `openwork start --workspace /path/to/workspace --approval auto`
@@ -30,7 +27,7 @@ OpenWork is designed around the idea that you can easily ship your agentic workf
 
 ## Quick start
 
-Download the dmg here https://github.com/different-ai/openwork/releases (or install from source below)
+Download the correct version in [here](https://openworklabs.com/download), in the latest [releases](https://github.com/different-ai/openwork/releases) or install from source below.
 
 ## Why
 
@@ -74,6 +71,30 @@ OpenWork is designed to be:
 - Tauri CLI: `cargo install tauri-cli`
 - OpenCode CLI installed and available on PATH: `opencode`
 
+### Local Dev Prerequisites (Desktop)
+
+Before running `pnpm dev`, ensure these are installed and active in your shell:
+
+- Node + pnpm (repo uses `pnpm@10.27.0`)
+- **Bun 1.3.9+** (`bun --version`)
+- Rust toolchain (for Tauri), with Cargo from current `rustup` stable (supports `Cargo.lock` v4)
+- Xcode Command Line Tools (macOS)
+- On Linux, WebKitGTK 4.1 development packages so `pkg-config` can resolve `webkit2gtk-4.1` and `javascriptcoregtk-4.1`
+
+### One-minute sanity check
+
+Run from repo root:
+
+```bash
+git checkout dev
+git pull --ff-only origin dev
+pnpm install --frozen-lockfile
+
+which bun
+bun --version
+pnpm --filter @different-ai/openwork exec tauri --version
+```
+
 ### Install
 
 ```bash
@@ -88,15 +109,20 @@ OpenWork now lives in `packages/app` (UI) and `packages/desktop` (desktop shell)
 pnpm dev
 ```
 
+`pnpm dev` now enables `OPENWORK_DEV_MODE=1` automatically, so desktop dev uses an isolated OpenCode state instead of your personal global config/auth/data.
+
 ### Run (Web UI only)
 
 ```bash
 pnpm dev:ui
 ```
 
+All repo `dev` entrypoints now opt into the same dev-mode isolation so local testing uses the OpenWork-managed OpenCode state consistently.
+
 ### Arch Users:
 
 ```bash
+sudo pacman -S --needed webkit2gtk-4.1
 yay -s opencode # Releases version
 ```
 
@@ -204,7 +230,7 @@ First contribution checklist:
 
 ## For Teams & Businesses
 
-Interested in using OpenWork in your organization? We'd love to hear from you — reach out at [benjamin.shafii@gmail.com](mailto:benjamin.shafii@gmail.com) to chat about your use case.
+Interested in using OpenWork in your organization? We'd love to hear from you — reach out at [ben@openworklabs.com](mailto:ben@openworklabs.com) to chat about your use case.
 
 ## License
 

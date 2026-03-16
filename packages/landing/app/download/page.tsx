@@ -1,6 +1,8 @@
 import { SiteFooter } from "../../components/site-footer";
 import { SiteNav } from "../../components/site-nav";
+import { resolveDownloadHref } from "../../lib/download-target";
 import { getGithubData } from "../../lib/github";
+import { headers } from "next/headers";
 
 export const metadata = {
   title: "OpenWork - Download",
@@ -10,12 +12,17 @@ export const metadata = {
 
 export default async function Download() {
   const github = await getGithubData();
+  const downloadHref = resolveDownloadHref(github, headers());
   const releaseLabel = github.releaseTag || "latest";
   const releaseUrl = github.releaseUrl;
 
   return (
     <div className="min-h-screen">
-      <SiteNav stars={github.stars} active="download" />
+      <SiteNav
+        stars={github.stars}
+        downloadHref={downloadHref}
+        active="download"
+      />
 
       <main className="pb-24 pt-20">
         <div className="content-max-width px-6">
